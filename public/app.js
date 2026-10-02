@@ -1,138 +1,15 @@
-const exercises = [
-  { prompt:"我通常在放学后做作业。", focus:"Present Simple + frequency", hints:["usually 表示习惯，用一般现在时。","主语 I 后面用 do。","I + usually + do my homework + after school."], model:"I usually do my homework after school." },
-  { prompt:"我妹妹每天乘公共汽车去学校。", focus:"Third-person singular", hints:["my sister 相当于 she。","第三人称单数：take → takes。","My sister + takes the bus + to school + every day."], model:"My sister takes the bus to school every day." },
-  { prompt:"我们昨天在科学课上做了一个实验。", focus:"Past Simple", hints:["yesterday 表示过去。","do 的过去式是 did。","We + did an experiment + in science class + yesterday."], model:"We did an experiment in science class yesterday." },
-  { prompt:"老师昨天没有给我们家庭作业。", focus:"didn't + base verb", hints:["这是过去时否定句。","didn't 后必须用动词原形。","The teacher + didn't give + us homework + yesterday."], model:"The teacher didn't give us homework yesterday." },
-  { prompt:"明天我们要在数学课上参加一个测验。", focus:"Future with will", hints:["tomorrow 表示将来。","will 后使用动词原形。","We + will + take a quiz + in math class + tomorrow."], model:"We will take a quiz in math class tomorrow." },
-  { prompt:"这两本书都很有趣。", focus:"Plural subject + be", hints:["books 是复数。","复数主语搭配 are。","These two books + are + interesting."], model:"These two books are interesting." },
-  { prompt:"我的朋友喜欢科学，因为他喜欢做实验。", focus:"because + third-person", hints:["because 后面说明原因。","my friend 和 he 都是第三人称单数。","My friend likes science because he likes doing experiments."], model:"My friend likes science because he likes doing experiments." },
-  { prompt:"当老师提问时，我会先认真听。", focus:"When clause", hints:["when 表示“当……的时候”。","teacher 是第三人称单数：ask → asks。","When the teacher asks a question, I listen carefully."], model:"When the teacher asks a question, I listen carefully first." },
-  { prompt:"我昨晚很累，所以我很早就睡觉了。", focus:"Past tense + so", hints:["last night 表示过去。","am → was；go → went。","I was tired last night, so I went to bed early."], model:"I was tired last night, so I went to bed early." },
-  { prompt:"如果我不懂一个单词，我会查它的意思。", focus:"If clause", hints:["if 表示“如果”。","描述通常做法，两部分都用一般现在时。","If I don't understand a word, I look up its meaning."], model:"If I don't understand a word, I look up its meaning." },
-  { prompt:"我的Chromebook现在不在书包里。", focus:"Singular + be negative", hints:["Chromebook 是单数。","否定使用 is not / isn't。","My Chromebook isn't in my backpack now."], model:"My Chromebook isn't in my backpack now." },
-  { prompt:"上周我读了一本很有趣的书，而且我把它推荐给了朋友。", focus:"Past tense + pronoun", hints:["last week 表示过去。","recommend → recommended。","I read an interesting book and recommended it to my friend."], model:"Last week, I read an interesting book and recommended it to my friend." }
-];
-
-let index = 0;
-let hintLevel = 0;
-const solved = new Set();
-const latestAnswers = new Map();
-const $ = id => document.getElementById(id);
-
-async function loadProgress() {
-  try {
-    const response = await fetch("/api/progress");
-    if (!response.ok) return;
-    const data = await response.json();
-    for (const id of data.solved || []) solved.add(id);
-    for (const row of data.latestAttempts || []) latestAnswers.set(row.exercise_id, row.answer);
-    const savedIndex = Number(data.state?.currentExercise);
-    if (Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < exercises.length) index = savedIndex;
-  } catch (error) {
-    console.warn("Could not load saved progress", error);
-  }
-}
-
-function savePosition() {
-  fetch("/api/state", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ currentExercise: index })
-  }).catch(() => {});
-}
-
-function render() {
-  const q = exercises[index];
-  $("focus").textContent = q.focus;
-  $("prompt").textContent = q.prompt;
-  $("progressText").textContent = `${index + 1} / ${exercises.length}`;
-  $("progressBar").style.width = `${((index + 1) / exercises.length) * 100}%`;
-  $("status").textContent = solved.has(index) ? "Solved ✓" : "";
-  $("score").textContent = `Solved ${solved.size} / ${exercises.length}`;
-  $("answer").value = latestAnswers.get(index) || "";
-  $("result").className = "result hidden";
-  $("hint").className = "notice hint hidden";
-  $("model").className = "notice model hidden";
-  hintLevel = 0;
-  savePosition();
-  $("answer").focus();
-}
-
-function metric(label, value) {
-  return `<div class="metric">${label}<b>${value === "ok" ? "✓" : value === "not_applicable" ? "—" : "△"}</b></div>`;
-}
-
-async function checkAnswer() {
-  const answer = $("answer").value.trim();
-  if (!answer) return;
-  const q = exercises[index];
-  $("loading").classList.remove("hidden");
-  $("result").className = "result hidden";
-  $("checkBtn").disabled = true;
-  try {
-    const response = await fetch("/api/check", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        exerciseId: index,
-        prompt: q.prompt,
-        answer,
-        grammarFocus: q.focus,
-        modelAnswer: q.model
-      })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Check failed");
-    latestAnswers.set(index, answer);
-    if (data.correct) solved.add(index);
-    $("result").className = `result ${data.correct ? "ok" : "bad"}`;
-    $("result").innerHTML = `
-      <strong>${data.correct ? "✓ Good sentence" : "Revise this sentence"}</strong>
-      <div class="grid">
-        ${metric("Meaning", data.meaning)}
-        ${metric("Grammar", data.grammar)}
-        ${metric("Tense", data.tense)}
-        ${metric("Capital", data.capitalization)}
-        ${metric("Punctuation", data.punctuation)}
-      </div>
-      <div><b>Feedback:</b> ${data.feedback}</div>
-      <div><b>Suggestion:</b> ${data.suggestion}</div>
-      <div><b>Better sentence:</b> ${data.betterSentence}</div>
-    `;
-    $("status").textContent = solved.has(index) ? "Solved ✓" : "";
-    $("score").textContent = `Solved ${solved.size} / ${exercises.length}`;
-  } catch (error) {
-    $("result").className = "result bad";
-    $("result").textContent = error.message;
-  } finally {
-    $("loading").classList.add("hidden");
-    $("checkBtn").disabled = false;
-  }
-}
-
-$("checkBtn").onclick = checkAnswer;
-$("hintBtn").onclick = () => {
-  hintLevel = Math.min(hintLevel + 1, 3);
-  $("hint").classList.remove("hidden");
-  $("hint").innerHTML = `<b>Hint ${hintLevel}:</b> ${exercises[index].hints[hintLevel - 1]}`;
-};
-$("modelBtn").onclick = () => {
-  $("model").classList.remove("hidden");
-  $("model").innerHTML = `<b>One model answer:</b> ${exercises[index].model}<br><span class="muted">Other natural answers can also be correct.</span>`;
-};
-$("clearBtn").onclick = () => { $("answer").value = ""; $("answer").focus(); };
-$("prevBtn").onclick = () => { if (index > 0) { index--; render(); } };
-$("nextBtn").onclick = () => { if (index < exercises.length - 1) { index++; render(); } };
-$("answer").addEventListener("keydown", event => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    checkAnswer();
-  }
-});
-
-async function init() {
-  await loadProgress();
-  render();
-}
-
-init();
+let exercises=[],index=0,hintLevel=0,correctToday=new Set(),mastery=[];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function metric(l,v){return `<div class="metric">${l}<b>${v==="ok"?"✓":v==="not_applicable"?"—":"△"}</b></div>`;}
+async function get(url){const r=await fetch(url);if(!r.ok)throw new Error(await r.text());return r.json();}
+async function loadToday(){const d=await get("/api/today");exercises=d.exercises;mastery=d.mastery;$("dayMeta").textContent=`Stage ${d.stage} • ${d.date} • 12 focused exercises`;render();}
+function render(){if(!exercises.length)return;const q=exercises[index];$("type").textContent=q.type.replace("_"," ");$("focus").textContent=q.focus;$("prompt").textContent=q.prompt;$("progressText").textContent=`${index+1} / ${exercises.length}`;$("progressBar").style.width=`${(index+1)/exercises.length*100}%`;$("score").textContent=`Correct today ${correctToday.size} / ${exercises.length}`;$("answer").value="";$("result").className="result hidden";$("hint").className="notice hint hidden";$("model").className="notice model hidden";hintLevel=0;$("answer").focus();}
+async function check(){const answer=$("answer").value.trim();if(!answer)return;const q=exercises[index];$("loading").classList.remove("hidden");$("checkBtn").disabled=true;try{const r=await fetch("/api/check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({exerciseId:q.id,prompt:q.prompt,answer,grammarFocus:q.focus,modelAnswer:q.model,skillId:q.skill,exerciseType:q.type})});const d=await r.json();if(!r.ok)throw new Error(d.error);if(d.correct)correctToday.add(index);$("result").className=`result ${d.correct?"ok":"bad"}`;$("result").innerHTML=`<strong>${d.correct?"✓ Good sentence":"Revise this sentence"}</strong><div class="grid">${metric("Meaning",d.meaning)}${metric("Grammar",d.grammar)}${metric("Tense",d.tense)}${metric("Capital",d.capitalization)}${metric("Punctuation",d.punctuation)}</div><p><b>Feedback:</b> ${esc(d.feedback)}</p><p><b>Suggestion:</b> ${esc(d.suggestion)}</p><p><b>Better sentence:</b> ${esc(d.betterSentence)}</p>`;$("score").textContent=`Correct today ${correctToday.size} / ${exercises.length}`;if(correctToday.size===exercises.length){await fetch("/api/complete-day",{method:"POST"});showReport();}}catch(e){$("result").className="result bad";$("result").textContent=e.message;}finally{$("loading").classList.add("hidden");$("checkBtn").disabled=false;}}
+async function showReport(){const d=await get("/api/report");$("report").classList.remove("hidden");$("report").innerHTML=`<h2>Today's Writing Report</h2><div class="summary-grid"><div><b>${d.correct}/${d.attempts}</b><span>Correct checks</span></div><div><b>${d.strong.length}</b><span>Strong skills</span></div><div><b>${d.weak.length}</b><span>Needs practice</span></div></div><h3>Strong today</h3><p>${esc(d.strong.join(", ")||"Keep practicing")}</p><h3>Needs more practice</h3><p>${esc(d.weak.join(", ")||"None today")}</p>`;}
+async function loadProgress(){const d=await get("/api/progress");$("stageText").textContent=`Current curriculum stage: ${d.stage}. Advancement depends on mastery, not the calendar.`;$("skillList").innerHTML=d.mastery.map(s=>`<div class="skill-row"><div><b>${esc(s.name)}</b><small>Stage ${s.stage} • ${esc(s.status)}</small></div><div class="skillbar"><i style="width:${s.score}%"></i></div><strong>${s.score}%</strong></div>`).join("");}
+async function loadReview(){const d=await get("/api/review");$("reviewList").innerHTML=d.reviews.length?d.reviews.map(r=>`<div class="history-row"><b>${esc(r.skill_id)}</b><span>Due ${esc(r.due_date)} • last issue: ${esc(r.last_error||"practice")}</span></div>`).join(""):'<p class="muted">No reviews are due today.</p>';}
+async function loadHistory(){const d=await get("/api/history");$("historyList").innerHTML=d.attempts.length?d.attempts.map(a=>`<div class="history-row"><div><b>${a.correct?"✓":"△"} ${esc(a.answer)}</b><small>${esc(a.session_date||a.created_at)} • ${esc(a.skill_id||a.grammar_focus||"legacy")}</small></div><span>${esc(a.feedback||"")}</span></div>`).join(""):'<p class="muted">No practice history yet.</p>';}
+document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.querySelectorAll(".view").forEach(x=>x.classList.add("hidden"));$(b.dataset.view+"View").classList.remove("hidden");if(b.dataset.view==="progress")await loadProgress();if(b.dataset.view==="review")await loadReview();if(b.dataset.view==="history")await loadHistory();});
+$("checkBtn").onclick=check;$("hintBtn").onclick=()=>{hintLevel=Math.min(3,hintLevel+1);$("hint").classList.remove("hidden");$("hint").innerHTML=`<b>Hint ${hintLevel}:</b> ${esc(exercises[index].hints[hintLevel-1])}`;};$("modelBtn").onclick=()=>{$("model").classList.remove("hidden");$("model").innerHTML=`<b>One model answer:</b> ${esc(exercises[index].model)}<br><span class="muted">Other natural answers can also be correct.</span>`;};$("clearBtn").onclick=()=>{$("answer").value="";$("answer").focus();};$("prevBtn").onclick=()=>{if(index>0){index--;render();}};$("nextBtn").onclick=()=>{if(index<exercises.length-1){index++;render();}else showReport();};$("answer").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();check();}});
+loadToday().catch(e=>{$("prompt").textContent="Could not load today's practice: "+e.message;});
