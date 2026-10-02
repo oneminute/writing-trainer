@@ -130,5 +130,9 @@ $("answer").addEventListener("keydown", event => {
   }
 });
 
-await loadProgress();
-render();
+async function init() {
+  await loadProgress();
+  render();
+}
+
+init();
