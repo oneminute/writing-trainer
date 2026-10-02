@@ -1,57 +1,36 @@
-# Writing Trainer
+# Writing Trainer v0.3
 
-A local web app for sentence-by-sentence English writing practice with OpenAI-powered feedback and SQLite progress storage.
+Writing Trainer is evolving from a sentence checker into an adaptive English-writing learning system.
 
-## Windows: easiest way to run
+## Learning loop
 
-Double-click:
+Curriculum → daily practice → OpenAI feedback → skill evidence → SQLite history → spaced review → progress/report → next practice.
 
-`start-writing-trainer.bat`
+## Curriculum
 
-The launcher will:
+The curriculum is defined in `src/curriculum.js`, from basic sentence structure through independent school writing. Calendar days do not automatically unlock harder writing. Progress is based on skill evidence.
 
-1. Check that Node.js is installed.
-2. Create `.env` from `.env.example` on first run.
-3. Open `.env` so you can enter your OpenAI API key.
-4. Run `npm install` automatically when dependencies are missing.
-5. Start the app on port **5178**.
-6. Open http://localhost:5178 in your browser.
+## Skill mastery
 
-After the first setup, normally you only need to double-click the BAT file.
+Each checked answer records evidence for its primary target skill. Recent attempts receive more weight. The UI shows Not started, Learning, Improving, Stable, or Mastered.
 
-## Data storage
+## Review
 
-The app automatically creates:
+Incorrect target skills enter a spaced review queue. Successful reviews move through approximately 1, 3, 7, and 14 day intervals. The goal is to test the rule again in new sentences rather than memorize one answer.
 
-`data/writing-trainer.db`
+## Daily practice
 
-This SQLite database stores every checked sentence, AI feedback, correctness, exercise progress, and the last exercise position.
+The initial 12-item set contains foundation, mixed, school-life, and transfer exercises. The next milestone is dynamic AI generation using the planner proportions: review + weak skills + current curriculum target + mixed transfer + independent writing.
 
-The `data/` directory and SQLite files are ignored by Git, so local student history is not committed to the public repository.
+## Pages
 
-## AI checking
+- **Today** — focused practice and end-of-day report
+- **Review** — skills due for spaced review
+- **Progress** — curriculum mastery map
+- **History** — previous sentences and feedback
 
-The server uses the OpenAI Responses API with structured output. The default model is configured in `.env`:
+## Windows
 
-```env
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5.6-luna
-PORT=5178
-```
+Double-click `start-writing-trainer.bat`. The local app runs at http://localhost:5178.
 
-The API key remains server-side and is never sent to browser JavaScript.
-
-## Manual start
-
-```powershell
-npm install
-npm start
-```
-
-Then open http://localhost:5178.
-
-## Stored attempt fields
-
-Each check records the exercise, student's sentence, correctness, meaning, grammar, tense, capitalization, punctuation, feedback, suggestion, improved sentence, and timestamp.
-
-This history is intended to support future features such as repeated-error analysis, review exercises, and automatic daily difficulty adjustment.
+SQLite data is stored in `data/writing-trainer.db` and is ignored by Git.
