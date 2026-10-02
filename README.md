@@ -1,54 +1,57 @@
 # Writing Trainer
 
-A web app for sentence-by-sentence English writing practice.
+A local web app for sentence-by-sentence English writing practice with OpenAI-powered feedback and SQLite progress storage.
 
-The browser provides the exercise UI. A Node/Express backend sends the student's sentence to the OpenAI Responses API for semantic and grammar evaluation, so correct alternative wording can be accepted instead of relying on fragile string matching.
+## Windows: easiest way to run
 
-## Features
+Double-click:
 
-- One-sentence writing exercises
-- Grammar focus for each exercise
-- Three-level hints
-- Model answer
-- AI evaluation of meaning, grammar, tense, capitalization, and punctuation
-- Short correction advice and a better example sentence
-- API key stays on the server
+`start-writing-trainer.bat`
 
-## Run locally
+The launcher will:
 
-1. Install Node.js 20+.
-2. Run `npm install`.
-3. Copy `.env.example` to `.env`.
-4. Put your OpenAI API key in `.env`.
-5. Run `npm run dev`.
-6. Open http://localhost:3000
+1. Check that Node.js is installed.
+2. Create `.env` from `.env.example` on first run.
+3. Open `.env` so you can enter your OpenAI API key.
+4. Run `npm install` automatically when dependencies are missing.
+5. Start the app on port **5178**.
+6. Open http://localhost:5178 in your browser.
 
-### Windows PowerShell
+After the first setup, normally you only need to double-click the BAT file.
 
-```powershell
-Copy-Item .env.example .env
-npm install
-npm run dev
-```
+## Data storage
 
-## Environment
+The app automatically creates:
+
+`data/writing-trainer.db`
+
+This SQLite database stores every checked sentence, AI feedback, correctness, exercise progress, and the last exercise position.
+
+The `data/` directory and SQLite files are ignored by Git, so local student history is not committed to the public repository.
+
+## AI checking
+
+The server uses the OpenAI Responses API with structured output. The default model is configured in `.env`:
 
 ```env
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5.6
-PORT=3000
+OPENAI_MODEL=gpt-5.6-luna
+PORT=5178
 ```
 
-Never commit your real API key.
+The API key remains server-side and is never sent to browser JavaScript.
 
-## Architecture
+## Manual start
 
-Browser -> POST /api/check -> Express server -> OpenAI Responses API -> structured feedback
+```powershell
+npm install
+npm start
+```
 
-## Next steps
+Then open http://localhost:5178.
 
-- Move daily exercise sets into JSON files
-- Track repeated grammar mistakes
-- Add paragraph writing
-- Add parent progress view
-- Add configurable difficulty and grammar targets
+## Stored attempt fields
+
+Each check records the exercise, student's sentence, correctness, meaning, grammar, tense, capitalization, punctuation, feedback, suggestion, improved sentence, and timestamp.
+
+This history is intended to support future features such as repeated-error analysis, review exercises, and automatic daily difficulty adjustment.
