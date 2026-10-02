@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 
 const app = express();
 const port = process.env.PORT || 3000;
-const model = process.env.OPENAI_MODEL || "gpt-5.6";
+const model = process.env.OPENAI_MODEL || "gpt-5.6-luna";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,6 +13,26 @@ const __dirname = path.dirname(__filename);
 
 app.use(express.json({ limit: "32kb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+const writingCheckSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    correct: { type: "boolean" },
+    meaning: { type: "string", enum: ["ok", "needs_work"] },
+    grammar: { type: "string", enum: ["ok", "needs_work"] },
+    tense: { type: "string", enum: ["ok", "needs_work", "not_applicable"] },
+    capitalization: { type: "string", enum: ["ok", "needs_work"] },
+    punctuation: { type: "string", enum: ["ok", "needs_work"] },
+    feedback: { type: "string" },
+    suggestion: { type: "string" },
+    betterSentence: { type: "string" }
+  },
+  required: [
+    "correct", "meaning", "grammar", "tense", "capitalization",
+    "punctuation", "feedback", "suggestion", "betterSentence"
+  ]
+};
 
 app.post("/api/check", async (req, res) => {
   try {
@@ -23,43 +43,29 @@ app.post("/api/check", async (req, res) => {
 
     const response = await client.responses.create({
       model,
-      instructions: [
-        "You are an English writing coach for an 11-year-old sixth-grade ESL student.",
-        "Evaluate the student's answer by meaning and grammar, not exact wording.",
-        "Accept natural alternative wording when it correctly expresses the prompt.",
-        "Be especially careful with tense, subject-verb agreement, articles, pronouns, singular/plural, prepositions, auxiliaries, clauses, capitalization, and punctuation.",
-        "Do not mark a correct sentence wrong just because it differs from the model answer.",
-        "Keep explanations short, concrete, and child-friendly.",
-        "Return ONLY valid JSON with this exact shape:",
-        '{"correct":boolean,"meaning":"ok|needs_work","grammar":"ok|needs_work","tense":"ok|needs_work|not_applicable","capitalization":"ok|needs_work","punctuation":"ok|needs_work","feedback":"string","suggestion":"string","betterSentence":"string"}'
-      ].join("\n"),
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: [
-                `Chinese prompt: ${prompt}`,
-                `Grammar focus: ${grammarFocus || "general sentence writing"}`,
-                `Student answer: ${answer}`,
-                `One possible model answer: ${modelAnswer || "(none)"}`,
-                "",
-                "Judge the student's sentence independently. The model answer is only a reference."
-              ].join("\n")
-            }
-          ]
+      reasoning: { effort: "none" },
+      max_output_tokens: 220,
+      instructions:
+        "You are a concise English writing coach for an 11-year-old ESL student. " +
+        "Judge meaning and grammar, not exact wording. Accept natural alternatives. " +
+        "Check the stated grammar focus carefully. Capitalization or punctuation alone " +
+        "should not make grammar or meaning fail. Keep feedback short and child-friendly.",
+      input:
+        `Prompt: ${prompt}\n` +
+        `Focus: ${grammarFocus || "general sentence writing"}\n` +
+        `Student: ${answer}\n` +
+        `Reference only: ${modelAnswer || "(none)"}`,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "writing_check",
+          strict: true,
+          schema: writingCheckSchema
         }
-      ]
+      }
     });
 
-    let parsed;
-    try {
-      parsed = JSON.parse(response.output_text);
-    } catch {
-      return res.status(502).json({ error: "Unexpected model response format", raw: response.output_text });
-    }
-    res.json(parsed);
+    res.json(JSON.parse(response.output_text));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error?.message || "OpenAI request failed" });
