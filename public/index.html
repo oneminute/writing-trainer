@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Writing Trainer</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="card hero">
+      <div>
+        <div class="eyebrow">WRITING TRAINER</div>
+        <h1>One sentence at a time.</h1>
+        <p>Write your own sentence first. OpenAI checks meaning, grammar, tense, capitalization, and punctuation.</p>
+      </div>
+      <div class="progress-wrap">
+        <div id="progressText">1 / 12</div>
+        <div class="progress"><div id="progressBar"></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="question-top">
+        <span id="focus" class="pill"></span>
+        <span id="status" class="muted"></span>
+      </div>
+      <h2 id="prompt"></h2>
+      <label for="answer">Write one complete English sentence:</label>
+      <textarea id="answer" spellcheck="true" placeholder="Type your sentence here..."></textarea>
+
+      <div class="actions">
+        <button id="checkBtn" class="primary">Check with AI ↵</button>
+        <button id="hintBtn">Hint</button>
+        <button id="modelBtn">Model answer</button>
+        <button id="clearBtn">Clear</button>
+      </div>
+
+      <div id="loading" class="notice hidden">Checking your sentence…</div>
+      <div id="result" class="result hidden"></div>
+      <div id="hint" class="notice hint hidden"></div>
+      <div id="model" class="notice model hidden"></div>
+
+      <div class="nav">
+        <button id="prevBtn">← Previous</button>
+        <div id="score" class="muted">Solved 0 / 12</div>
+        <button id="nextBtn" class="primary">Next →</button>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
