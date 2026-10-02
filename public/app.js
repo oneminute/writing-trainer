@@ -16,7 +16,30 @@ const exercises = [
 let index = 0;
 let hintLevel = 0;
 const solved = new Set();
+const latestAnswers = new Map();
 const $ = id => document.getElementById(id);
+
+async function loadProgress() {
+  try {
+    const response = await fetch("/api/progress");
+    if (!response.ok) return;
+    const data = await response.json();
+    for (const id of data.solved || []) solved.add(id);
+    for (const row of data.latestAttempts || []) latestAnswers.set(row.exercise_id, row.answer);
+    const savedIndex = Number(data.state?.currentExercise);
+    if (Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < exercises.length) index = savedIndex;
+  } catch (error) {
+    console.warn("Could not load saved progress", error);
+  }
+}
+
+function savePosition() {
+  fetch("/api/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentExercise: index })
+  }).catch(() => {});
+}
 
 function render() {
   const q = exercises[index];
@@ -26,11 +49,12 @@ function render() {
   $("progressBar").style.width = `${((index + 1) / exercises.length) * 100}%`;
   $("status").textContent = solved.has(index) ? "Solved ✓" : "";
   $("score").textContent = `Solved ${solved.size} / ${exercises.length}`;
-  $("answer").value = "";
+  $("answer").value = latestAnswers.get(index) || "";
   $("result").className = "result hidden";
   $("hint").className = "notice hint hidden";
   $("model").className = "notice model hidden";
   hintLevel = 0;
+  savePosition();
   $("answer").focus();
 }
 
@@ -49,10 +73,17 @@ async function checkAnswer() {
     const response = await fetch("/api/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: q.prompt, answer, grammarFocus: q.focus, modelAnswer: q.model })
+      body: JSON.stringify({
+        exerciseId: index,
+        prompt: q.prompt,
+        answer,
+        grammarFocus: q.focus,
+        modelAnswer: q.model
+      })
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Check failed");
+    latestAnswers.set(index, answer);
     if (data.correct) solved.add(index);
     $("result").className = `result ${data.correct ? "ok" : "bad"}`;
     $("result").innerHTML = `
@@ -98,4 +129,6 @@ $("answer").addEventListener("keydown", event => {
     checkAnswer();
   }
 });
+
+await loadProgress();
 render();
