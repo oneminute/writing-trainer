@@ -165,21 +165,70 @@ async function loadToday(){
  render();
 }
 
-async function generate(mode,skillId="",force=false){
- return post("/api/generate",{mode,skillId,force});
+async function generate(mode,skillId="",force=false,lessonId=""){
+ return post("/api/generate",{mode,skillId,lessonId,force});
+}
+
+function planList(items){
+ return '<ul>'+items.map(x=>'<li>'+esc(x)+'</li>').join("")+'</ul>';
 }
 
 async function loadPlan(){
- const d=await get("/api/plan"),groups={};
- d.skills.forEach(s=>(groups[s.stage]??=[]).push(s));
- $("planList").innerHTML=Object.entries(groups).map(([stage,items])=>{
-  const stable=items.filter(s=>s.status==="Stable"||s.status==="Mastered").length;
-  return '<div class="plan-stage '+(Number(stage)===d.currentStage?'current':'')+'">'+
-   '<div class="stage-head"><h3>Stage '+stage+(Number(stage)===d.currentStage?' • CURRENT':'')+'</h3><span class="muted">'+stable+' / '+items.length+' stable+</span></div>'+
-   items.map(s=>'<div class="plan-skill"><div><b>'+esc(s.name)+'</b><small>'+esc(s.description)+' • '+esc(s.status)+' • '+s.score+'% • independent '+s.independentCorrect+' / assisted '+s.assistedCorrect+'</small></div><button data-skill="'+s.id+'">Practice</button></div>').join("")+
-   '</div>';
+ const d=await get("/api/plan");
+ $("planList").innerHTML='<div class="plan-version">Curriculum v'+d.curriculumVersion+' • deterministic plan stored in SQLite • Qwen only generates exercises from these lessons</div>'+
+ d.stages.map(stage=>{
+  const stable=stage.lessons.filter(x=>x.status==="Stable"||x.status==="Mastered").length;
+  return '<div class="plan-stage '+(stage.stage===d.currentStage?'current':'')+'">'+
+   '<div class="stage-head"><div><h3>Stage '+stage.stage+' · '+esc(stage.title)+(stage.stage===d.currentStage?' • CURRENT':'')+'</h3><p class="stage-goal">'+esc(stage.goal)+'</p></div><span class="muted">'+stable+' / '+stage.lessons.length+' lessons stable+</span></div>'+
+   (stage.parentNoteZh?'<p class="parent-note">'+esc(stage.parentNoteZh)+'</p>':'')+
+   '<div class="stage-spec"><span><b>Prompt:</b> '+esc(stage.promptMode)+'</span><span><b>Expected output:</b> '+esc(stage.sentenceMode)+'</span></div>'+
+   '<p class="muted"><b>Advancement:</b> '+esc(stage.advancement)+'</p>'+
+   '<details class="stage-guardrails"><summary>Stage generation guardrails</summary>'+planList(stage.generationGuardrails||[])+'</details>'+
+   '<div class="lesson-list">'+stage.lessons.map(l=>
+    '<div class="lesson-card" data-lesson-card="'+l.id+'">'+
+     '<div class="lesson-main"><div><div class="lesson-title">'+esc(l.title)+'</div>'+
+      '<small>Skill: '+esc(l.skill_id)+' • '+esc(l.status)+' • '+l.score+'% • evidence '+l.attempts+' • independent '+l.independentCorrect+' / assisted '+l.assistedCorrect+'</small>'+
+      '<p>'+esc(l.objective)+'</p></div>'+
+      '<div class="lesson-actions"><button data-plan-action="details" data-lesson="'+l.id+'">Details</button><button class="primary" data-plan-action="practice" data-lesson="'+l.id+'" data-skill="'+l.skill_id+'">Practice</button></div></div>'+
+     '<div class="lesson-detail hidden" id="lesson-detail-'+l.id+'">'+
+      '<div class="lesson-detail-grid">'+
+       '<div><h4>Rules Qwen must test</h4>'+planList(l.rules||[])+'</div>'+
+       '<div><h4>Common errors to target</h4>'+planList(l.commonErrors||[])+'</div>'+
+       '<div><h4>Prompt-pattern examples</h4>'+planList(l.promptPatterns||[])+'</div>'+
+       '<div><h4>Required elements</h4>'+planList(l.requiredElements||[])+'</div>'+
+       '<div><h4>Avoid</h4>'+planList(l.avoid||[])+'</div>'+
+       '<div><h4>Difficulty</h4><p>'+esc(l.difficulty||"")+'</p></div>'+
+      '</div>'+
+     '</div>'+
+    '</div>'
+   ).join("")+'</div>'+
+  '</div>';
  }).join("");
- document.querySelectorAll("[data-skill]").forEach(b=>b.onclick=()=>startSkill(b.dataset.skill));
+
+ $("planList").onclick=e=>{
+  const b=e.target.closest("[data-plan-action]");
+  if(!b) return;
+  if(b.dataset.planAction==="details"){
+   const detail=$("lesson-detail-"+b.dataset.lesson);
+   if(detail) detail.classList.toggle("hidden");
+  }else if(b.dataset.planAction==="practice"){
+   startLesson(b.dataset.lesson,b.dataset.skill,b);
+  }
+ };
+}
+
+async function startLesson(lessonId,skillId,button=null){
+ const b=button;
+ if(b){b.disabled=true;b.textContent="Generating...";}
+ try{
+  const d=await generate("skill",skillId,true,lessonId);
+  if(!d.groupId) throw new Error("Generated set was not saved.");
+  await startGroupSession(d.groupId,{title:"Lesson Practice",meta:"Curriculum lesson • "+lessonId+" • "+d.exercises.length+" guided questions"});
+ }catch(e){
+  alert("Could not generate lesson practice: "+e.message);
+ }finally{
+  if(b&&b.isConnected){b.disabled=false;b.textContent="Practice";}
+ }
 }
 
 async function startSkill(id){
@@ -192,7 +241,7 @@ async function startSkill(id){
  }catch(e){
   alert("Could not generate practice: "+e.message);
  }finally{
-  if(b){b.disabled=false;b.textContent="Practice";}
+  if(b&&b.isConnected){b.disabled=false;b.textContent="Practice";}
  }
 }
 
@@ -206,7 +255,7 @@ async function check(){
   await ensureSession();
   const state=sessionItemAt(index);
   const r=await fetch("/api/check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-   exerciseId:q.id,prompt:q.prompt,answer,grammarFocus:q.focus,modelAnswer:q.model,skillId:q.skill,exerciseType:q.type,
+   exerciseId:q.id,prompt:q.prompt,answer,grammarFocus:q.focus,modelAnswer:q.model,skillId:q.skill,lessonId:q.lessonId||"",exerciseType:q.type,
    sessionId:currentSessionId,position:index,hintLevel:state?.hint_level||hintLevel,modelViewed:Boolean(state?.model_viewed||modelViewed)
   })});
   const d=await r.json();
@@ -256,7 +305,7 @@ function attemptCard(a){
  if(Number(a.hint_level||0)>0) assistance.push("Hint "+a.hint_level);
  if(Number(a.model_viewed||0)===1) assistance.push("Model viewed");
  if(Number(a.first_try||0)===1) assistance.push("First try");
- const context=(a.session_title?" • "+esc(a.session_title):"")+(a.session_mode?" • "+esc(a.session_mode):"");
+ const context=(a.session_title?" • "+esc(a.session_title):"")+(a.session_mode?" • "+esc(a.session_mode):"")+(a.lesson_id?" • lesson "+esc(a.lesson_id):"");
  return '<div class="attempt-card" data-attempt-id="'+a.id+'">'+
   '<div class="attempt-summary"><div><b>'+(a.correct?"✓ ":"△ ")+esc(a.answer||"")+'</b><small>'+esc(a.session_date||a.created_at||"")+' • '+esc(a.skill_id||"legacy")+context+(a.error_tag&&a.error_tag!=="none"?' • '+esc(a.error_tag):"")+'</small></div>'+
   '<button data-history-toggle="'+a.id+'">Details</button></div>'+
