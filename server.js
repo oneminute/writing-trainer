@@ -438,7 +438,7 @@ async function generateExercises(skills,count,mode,targetSequence=null){
     console.warn("Rejected generated batch:",problem);
    }catch(e){
     lastError=e?.message||String(e);
-    if(attempt===2) throw new Error(lastError);
+    if(lastError.startsWith("Ollama generation timed out")||attempt===2) throw new Error(lastError);
    }
   }
   throw new Error(lastError||"Exercise generation failed");
