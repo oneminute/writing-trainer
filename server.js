@@ -126,12 +126,48 @@ function currentStage(mastery){
  return 12;
 }
 
+
+const exerciseSchema={type:"object",additionalProperties:false,properties:{exercises:{type:"array",minItems:1,maxItems:12,items:{type:"object",additionalProperties:false,properties:{id:{type:"string"},type:{type:"string"},skill:{type:"string"},reviewSkills:{type:"array",items:{type:"string"}},prompt:{type:"string"},focus:{type:"string"},hints:{type:"array",minItems:3,maxItems:3,items:{type:"string"}},model:{type:"string"}},required:["id","type","skill","reviewSkills","prompt","focus","hints","model"]}}},required:["exercises"]};
+
+async function generateExercises(skills,count,mode){
+ const allowed=skills.filter(x=>skillMap[x]).slice(0,8);
+ const instructions="Create English writing exercises for an 11-year-old sixth-grade ESL student. Prompts are Chinese; student writes English. Test one primary skill per item. Give 3 progressive hints. Use natural American English model answers. Do not duplicate prompts. Return only valid JSON.";
+ const input="Mode: "+mode+". Exactly "+count+" exercises. Allowed skill IDs: "+allowed.join(", ")+". Descriptions: "+allowed.map(id=>id+": "+skillMap[id].description).join("; ")+". type="+mode+".";
+ if(llmProvider!=="openai"){
+  try{
+   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ollamaTimeoutMs);
+   const response=await fetch(ollamaBaseUrl+"/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({model:ollamaModel,stream:false,think:false,keep_alive:"10m",format:exerciseSchema,options:{temperature:.2},messages:[{role:"system",content:instructions},{role:"user",content:input}]})});
+   clearTimeout(timer); if(!response.ok)throw new Error("Ollama HTTP "+response.status);
+   const data=await response.json(); return JSON.parse(data.message?.content||"{}").exercises;
+  }catch(e){if(llmProvider!=="auto")throw e; console.warn("Ollama generation failed; fallback:",e.message);}
+ }
+ if(!client)throw new Error("OpenAI fallback unavailable");
+ const r=await client.responses.create({model:openaiModel,reasoning:{effort:"none"},max_output_tokens:1800,instructions,input,text:{format:{type:"json_schema",name:"exercise_set",strict:true,schema:exerciseSchema}}});
+ return JSON.parse(r.output_text).exercises;
+}
+
+app.get("/api/plan",(req,res)=>{const mastery=masteryRows();res.json({currentStage:currentStage(mastery),skills:mastery});});
+
+app.post("/api/generate",async(req,res)=>{
+ try{
+  const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), force=Boolean(req.body?.force);
+  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=12,setKey="";
+  if(mode==="skill"){if(!skillMap[requestedSkill])return res.status(400).json({error:"Unknown skill"});skills=[requestedSkill];count=6;setKey="skill:"+requestedSkill+":"+date;}
+  else if(mode==="review"){skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id);if(!skills.length)return res.status(400).json({error:"No reviews are due today"});count=Math.min(8,skills.length*2);setKey="review:"+date;}
+  else{const due=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 2").all(date).map(x=>x.skill_id);const weak=mastery.filter(x=>x.attempts&&x.score<70).sort((a,b)=>a.score-b.score).slice(0,2).map(x=>x.id);const current=SKILLS.filter(x=>x.stage===stage).map(x=>x.id);skills=[...new Set([...due,...weak,...current])];if(!skills.length)skills=SKILLS.filter(x=>x.stage<=Math.max(2,stage)).slice(0,6).map(x=>x.id);setKey="today:"+date;}
+  if(!force){const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get(setKey);if(cached)return res.json({cached:true,mode,exercises:JSON.parse(cached.exercises_json)});}
+  const exercises=await generateExercises(skills,count,mode);
+  db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json) VALUES(?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises));
+  res.json({cached:false,mode,exercises});
+ }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
+});
+
 app.get("/api/today",(req,res)=>{
  const date=today();
  db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
  const mastery=masteryRows();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
- res.json({date,stage:currentStage(mastery),exercises:BASE_EXERCISES,dueReviews:due,mastery});
+ const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get("today:"+date);\n res.json({date,stage:currentStage(mastery),exercises:cached?JSON.parse(cached.exercises_json):BASE_EXERCISES,dueReviews:due,mastery,generated:Boolean(cached)});
 });
 
 app.get("/api/progress",(req,res)=>{
