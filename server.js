@@ -506,12 +506,99 @@ app.get("/api/today",(req,res)=>{
  res.json({date,stage,practiceCount,groupId,exercises,dueReviews:due,mastery,generated});
 });
 
+function periodMetrics(days){
+ const cutoff="-"+days+" days";
+ const q=db.prepare(`SELECT COUNT(*) questions,
+  SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) correct,
+  SUM(CASE WHEN first_try_correct=1 THEN 1 ELSE 0 END) first_try,
+  SUM(CASE WHEN hint_level>0 THEN 1 ELSE 0 END) hints,
+  SUM(CASE WHEN model_viewed=1 THEN 1 ELSE 0 END) model_viewed
+  FROM practice_session_items
+  WHERE attempt_count>0 AND updated_at>=datetime('now',?)`).get(cutoff);
+ const sessions=db.prepare(`SELECT COUNT(*) total,
+  SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed
+  FROM practice_sessions WHERE started_at>=datetime('now',?)`).get(cutoff);
+ const checks=db.prepare(`SELECT COUNT(*) checks,
+  SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) correct_checks,
+  SUM(CASE WHEN error_tag IS NOT NULL AND error_tag NOT IN ('none','assisted_success') THEN 1 ELSE 0 END) errors
+  FROM attempts WHERE session_date>=date('now',?)`).get(cutoff);
+ const questions=Number(q.questions||0);
+ return {
+  days,
+  questions,
+  finalCorrect:Number(q.correct||0),
+  firstTryCorrect:Number(q.first_try||0),
+  firstTryRate:questions?Math.round(Number(q.first_try||0)/questions*100):0,
+  hintUsed:Number(q.hints||0),
+  modelViewed:Number(q.model_viewed||0),
+  sessions:Number(sessions.total||0),
+  completedSessions:Number(sessions.completed||0),
+  checks:Number(checks.checks||0),
+  correctChecks:Number(checks.correct_checks||0),
+  errors:Number(checks.errors||0)
+ };
+}
+
 app.get("/api/progress",(req,res)=>{
  const mastery=masteryRows();
+ const stage=currentStage(mastery);
+ const stageSkills=mastery.filter(x=>x.stage===stage);
+ const stableSkills=stageSkills.filter(x=>x.score>=75);
+ const blockers=stageSkills.filter(x=>x.score<75).sort((a,b)=>a.score-b.score);
  const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
  const sessions=db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed FROM practice_sessions").get();
- const errors=db.prepare("SELECT last_error error,COUNT(*) count FROM review_queue WHERE last_error IS NOT NULL GROUP BY last_error ORDER BY count DESC LIMIT 8").all();
- res.json({mastery,stage:currentStage(mastery),totals,sessions,errors});
+ const errors=db.prepare(`SELECT error_tag error,COUNT(*) count
+  FROM attempts
+  WHERE error_tag IS NOT NULL AND error_tag NOT IN ('none','assisted_success')
+   AND session_date>=date('now','-30 days')
+  GROUP BY error_tag ORDER BY count DESC,error_tag LIMIT 10`).all();
+ const trend=db.prepare(`SELECT a.session_date date,COUNT(*) checks,SUM(a.correct) correct,
+  SUM(CASE WHEN a.error_tag IS NOT NULL AND a.error_tag NOT IN ('none','assisted_success') THEN 1 ELSE 0 END) errors,
+  SUM(CASE WHEN sa.success=1 AND sa.first_try=1 AND COALESCE(sa.hint_level,0)=0 AND COALESCE(sa.model_viewed,0)=0 THEN 1 ELSE 0 END) independent_correct
+  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  WHERE a.session_date>=date('now','-13 days')
+  GROUP BY a.session_date ORDER BY a.session_date`).all();
+ const recentSessions=db.prepare(`SELECT id,group_id,title,mode,status,total_items,correct_count,first_try_correct,started_at,completed_at
+  FROM practice_sessions ORDER BY id DESC LIMIT 10`).all();
+ res.json({
+  mastery,stage,totals,sessions,errors,trend,recentSessions,
+  last7:periodMetrics(7),last30:periodMetrics(30),
+  stageProgress:{
+   stage,total:stageSkills.length,stable:stableSkills.length,
+   percent:stageSkills.length?Math.round(stableSkills.length/stageSkills.length*100):100,
+   blockers:blockers.map(x=>({id:x.id,name:x.name,score:x.score,status:x.status}))
+  }
+ });
+});
+
+app.get("/api/skills/:id",(req,res)=>{
+ const id=String(req.params.id||"");
+ if(!skillMap[id]) return res.status(404).json({error:"Unknown skill"});
+ const mastery=masteryRows().find(x=>x.id===id);
+ const attempts=db.prepare(`SELECT a.id,a.session_date,a.prompt,a.answer,a.correct,a.error_tag,a.feedback,a.suggestion,a.better_sentence,a.created_at,
+  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
+  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  WHERE a.skill_id=? ORDER BY a.id DESC LIMIT 30`).all(id);
+ const errors=db.prepare(`SELECT COALESCE(error_tag,'other') error,COUNT(*) count
+  FROM attempts WHERE skill_id=? AND error_tag IS NOT NULL AND error_tag NOT IN ('none','assisted_success')
+  GROUP BY error_tag ORDER BY count DESC`).all(id);
+ res.json({skill:mastery,attempts,errors});
+});
+
+app.get("/api/errors/:tag",(req,res)=>{
+ const tag=String(req.params.tag||"");
+ if(!ERROR_TAGS.includes(tag)||tag==="none") return res.status(400).json({error:"Unknown error category"});
+ const days=Math.max(1,Math.min(365,Number(req.query.days)||30));
+ const cutoff="-"+days+" days";
+ const attempts=db.prepare(`SELECT a.id,a.session_date,a.skill_id,a.prompt,a.answer,a.correct,a.error_tag,a.feedback,a.suggestion,a.better_sentence,a.created_at,
+  sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
+  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  WHERE a.error_tag=? AND a.session_date>=date('now',?)
+  ORDER BY a.id DESC LIMIT 100`).all(tag,cutoff);
+ const bySkill=db.prepare(`SELECT skill_id,COUNT(*) count FROM attempts
+  WHERE error_tag=? AND session_date>=date('now',?)
+  GROUP BY skill_id ORDER BY count DESC`).all(tag,cutoff);
+ res.json({tag,days,count:attempts.length,bySkill,attempts});
 });
 
 app.get("/api/practice-groups",(req,res)=>{
@@ -612,8 +699,24 @@ app.patch("/api/sessions/:id/items/:position",(req,res)=>{
 });
 
 app.get("/api/history",(req,res)=>{
- const rows=db.prepare("SELECT id,session_date,exercise_id,exercise_type,skill_id,prompt,answer,correct,error_tag,feedback,suggestion,better_sentence,created_at FROM attempts ORDER BY id DESC LIMIT 200").all();
- res.json({attempts:rows});
+ const skill=String(req.query.skill||"").trim();
+ const error=String(req.query.error||"").trim();
+ const result=String(req.query.result||"all");
+ const days=Math.max(0,Math.min(3650,Number(req.query.days)||30));
+ const where=["1=1"],params=[];
+ if(skill){where.push("a.skill_id=?");params.push(skill);}
+ if(error){where.push("a.error_tag=?");params.push(error);}
+ if(result==="correct"||result==="incorrect"){where.push("a.correct=?");params.push(result==="correct"?1:0);}
+ if(days>0){where.push("a.session_date>=date('now',?)");params.push("-"+days+" days");}
+ const rows=db.prepare(`SELECT a.id,a.session_date,a.exercise_id,a.exercise_type,a.skill_id,a.prompt,a.answer,a.correct,a.error_tag,
+  a.feedback,a.suggestion,a.better_sentence,a.created_at,
+  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
+  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  WHERE ${where.join(" AND ")}
+  ORDER BY a.id DESC LIMIT 300`).all(...params);
+ const skills=db.prepare("SELECT DISTINCT skill_id FROM attempts WHERE skill_id IS NOT NULL ORDER BY skill_id").all().map(x=>x.skill_id);
+ const errors=db.prepare("SELECT DISTINCT error_tag FROM attempts WHERE error_tag IS NOT NULL AND error_tag!='none' ORDER BY error_tag").all().map(x=>x.error_tag);
+ res.json({attempts:rows,filters:{skill,error,result,days},options:{skills,errors}});
 });
 
 app.get("/api/review",(req,res)=>{
