@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS daily_sessions (
 `);
 
 const cols = db.prepare("PRAGMA table_info(attempts)").all().map(x=>x.name);
-for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"],["error_tag","TEXT"]]) {
+for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"],["error_tag","TEXT"],["session_id","INTEGER"],["session_position","INTEGER"]]) {
   if (!cols.includes(name)) db.exec(`ALTER TABLE attempts ADD COLUMN ${name} ${type}`);
 }
 db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
@@ -590,8 +590,10 @@ app.get("/api/skills/:id",(req,res)=>{
  if(!skillMap[id]) return res.status(404).json({error:"Unknown skill"});
  const mastery=masteryRows().find(x=>x.id===id);
  const attempts=db.prepare(`SELECT a.id,a.session_date,a.prompt,a.answer,a.correct,a.error_tag,a.feedback,a.suggestion,a.better_sentence,a.created_at,
-  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
-  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed,ps.title session_title,ps.mode session_mode
+  FROM attempts a
+  LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  LEFT JOIN practice_sessions ps ON ps.id=a.session_id
   WHERE a.skill_id=? ORDER BY a.id DESC LIMIT 30`).all(id);
  const errors=db.prepare(`SELECT COALESCE(error_tag,'other') error,COUNT(*) count
   FROM attempts WHERE skill_id=? AND error_tag IS NOT NULL AND error_tag NOT IN ('none','assisted_success')
@@ -605,8 +607,8 @@ app.get("/api/errors/:tag",(req,res)=>{
  const days=Math.max(1,Math.min(365,Number(req.query.days)||30));
  const cutoff="-"+days+" days";
  const attempts=db.prepare(`SELECT a.id,a.session_date,a.skill_id,a.prompt,a.answer,a.correct,a.error_tag,a.feedback,a.suggestion,a.better_sentence,a.created_at,
-  sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
-  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed,ps.title session_title,ps.mode session_mode
+  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id LEFT JOIN practice_sessions ps ON ps.id=a.session_id
   WHERE a.error_tag=? AND a.session_date>=date('now',?)
   ORDER BY a.id DESC LIMIT 100`).all(tag,cutoff);
  const bySkill=db.prepare(`SELECT skill_id,COUNT(*) count FROM attempts
@@ -716,17 +718,22 @@ app.get("/api/history",(req,res)=>{
  const skill=String(req.query.skill||"").trim();
  const error=String(req.query.error||"").trim();
  const result=String(req.query.result||"all");
+ const mode=String(req.query.mode||"").trim();
  const requestedDays=req.query.days===undefined?30:Number(req.query.days);
  const days=Math.max(0,Math.min(3650,Number.isFinite(requestedDays)?requestedDays:30));
  const where=["1=1"],params=[];
  if(skill){where.push("a.skill_id=?");params.push(skill);}
  if(error){where.push("a.error_tag=?");params.push(error);}
  if(result==="correct"||result==="incorrect"){where.push("a.correct=?");params.push(result==="correct"?1:0);}
+ if(mode){where.push("COALESCE(ps.mode,a.exercise_type)=?");params.push(mode);}
  if(days>0){where.push("a.session_date>=date('now',?)");params.push("-"+days+" days");}
  const rows=db.prepare(`SELECT a.id,a.session_date,a.exercise_id,a.exercise_type,a.skill_id,a.prompt,a.answer,a.correct,a.error_tag,
-  a.feedback,a.suggestion,a.better_sentence,a.created_at,
-  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed
-  FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  a.feedback,a.suggestion,a.better_sentence,a.created_at,a.session_id,a.session_position,
+  sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed,
+  ps.title session_title,ps.mode session_mode
+  FROM attempts a
+  LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
+  LEFT JOIN practice_sessions ps ON ps.id=a.session_id
   WHERE ${where.join(" AND ")}
   ORDER BY a.id DESC LIMIT 300`).all(...params);
  const skills=db.prepare("SELECT DISTINCT skill_id FROM attempts WHERE skill_id IS NOT NULL ORDER BY skill_id").all().map(x=>x.skill_id);
@@ -774,7 +781,7 @@ app.post("/api/check",async(req,res)=>{
    else if(firstTry) evidence=1;
    else evidence=.8;
   }
-  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag);
+  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position));
   const aid=Number(info.lastInsertRowid);
   db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
 
