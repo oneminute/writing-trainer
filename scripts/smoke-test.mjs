@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { once } from "node:events";
 
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"writing-trainer-smoke-"));
 const port=54000+(process.pid%1000);
