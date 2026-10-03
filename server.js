@@ -1062,11 +1062,18 @@ app.post("/api/check",async(req,res)=>{
   const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,lessonId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
   if(exerciseId===undefined||!prompt||!answer||!skillId) return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
   const skill=skillMap[skillId];
+  let resolvedLesson=lessonId?curriculumLesson(lessonId):null;
+  if(!resolvedLesson){
+   try{resolvedLesson=chooseLessonSequence([skillId],Math.max(currentStage(),skill?.stage||1))[0]||null;}catch{}
+  }
+  const resolvedLessonId=resolvedLesson?.id||null;
   const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
   const previousAttempts=sessionItem?.attempt_count||0;
   const firstTry=previousAttempts===0;
-  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly.";
-  const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
+  const lessonRules=resolvedLesson?parseJsonArray(resolvedLesson.rules_json).join(" | "):"";
+  const lessonErrors=resolvedLesson?parseJsonArray(resolvedLesson.common_errors_json).join(" | "):"";
+  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill and assigned curriculum lesson separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly. Follow the deterministic curriculum rule rather than inventing a new target.";
+  const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nCurriculum lesson: "+(resolvedLesson?.title||resolvedLessonId||"legacy")+"\nLesson objective: "+(resolvedLesson?.objective||"")+"\nLesson rules: "+lessonRules+"\nCommon target errors: "+lessonErrors+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
   const r=await runWritingCheck(input,instructions);
   r.errorTag=normalizeErrorTag(r.errorTag,r);
   let evidence=0;
@@ -1077,10 +1084,10 @@ app.post("/api/check",async(req,res)=>{
    else if(firstTry) evidence=1;
    else evidence=.8;
   }
-  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position,lesson_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position),lessonId||null);
+  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position,lesson_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position),resolvedLessonId);
   const aid=Number(info.lastInsertRowid);
   db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
-  if(lessonId&&curriculumLesson(lessonId)) db.prepare("INSERT INTO lesson_attempts(attempt_id,lesson_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?,?)").run(aid,lessonId,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+  if(resolvedLessonId) db.prepare("INSERT INTO lesson_attempts(attempt_id,lesson_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?,?)").run(aid,resolvedLessonId,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
 
   if(sessionItem){
    const newAttemptCount=previousAttempts+1;
