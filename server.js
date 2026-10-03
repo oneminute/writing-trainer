@@ -620,6 +620,7 @@ app.get("/api/errors/:tag",(req,res)=>{
 app.get("/api/practice-groups",(req,res)=>{
  const groups=db.prepare(`SELECT g.id,g.mode,g.skill_id,g.title,g.exercise_count,g.favorite,g.created_at,
   (SELECT COUNT(*) FROM practice_sessions s WHERE s.group_id=g.id) session_count,
+  (SELECT id FROM practice_sessions s WHERE s.group_id=g.id AND s.status='in_progress' ORDER BY s.id DESC LIMIT 1) active_session_id,
   (SELECT ROUND(100.0*s.correct_count/NULLIF(s.total_items,0)) FROM practice_sessions s WHERE s.group_id=g.id AND s.status='completed' ORDER BY s.id DESC LIMIT 1) last_score
   FROM practice_groups g ORDER BY g.favorite DESC,g.id DESC LIMIT 300`).all();
  res.json({groups:groups.map(g=>({...g,skillName:g.skill_id?(skillMap[g.skill_id]?.name||g.skill_id):null}))});
