@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "test": "node --check server.js && node --check public/app.js"
+    "test": "node --check server.js && node --check public/app.js && node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
