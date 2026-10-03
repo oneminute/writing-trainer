@@ -11,7 +11,33 @@
 <div id="report" class="card hidden"></div></section>
 <section id="planView" class="view hidden"><div class="card"><h2>Learning Plan</h2><p class="muted">Difficulty advances by demonstrated mastery, not by calendar date.</p><div id="planList"></div></div></section>
 <section id="reviewView" class="view hidden"><div class="card"><h2>Review Queue</h2><p class="muted">Skills return after 1, 3, 7 and 14 days until they become stable.</p><div class="actions"><button id="generateReview" class="primary">Generate Due Review Practice</button></div><div id="reviewList"></div></div></section>
-<section id="progressView" class="view hidden"><div class="card"><h2>Writing Skill Map</h2><p id="stageText" class="muted"></p><div id="skillList"></div></div></section>
+<section id="progressView" class="view hidden">
+ <div class="card">
+  <h2>Progress Dashboard</h2>
+  <p id="stageText" class="muted"></p>
+  <div id="progressSummary" class="dashboard-grid"></div>
+ </div>
+ <div class="card">
+  <h2>Current Stage</h2>
+  <div id="stageProgress"></div>
+ </div>
+ <div class="card">
+  <h2>Recent Trend</h2>
+  <div id="trendList"></div>
+ </div>
+ <div class="card">
+  <h2>Error Patterns · Last 30 Days</h2>
+  <p class="muted">Click an error category to see the actual sentences behind it.</p>
+  <div id="errorList"></div>
+  <div id="errorDetail" class="drilldown hidden"></div>
+ </div>
+ <div class="card">
+  <h2>Writing Skill Map</h2>
+  <p class="muted">Click a skill to inspect its recent evidence and mistakes.</p>
+  <div id="skillList"></div>
+  <div id="skillDetail" class="drilldown hidden"></div>
+ </div>
+</section>
 <section id="setsView" class="view hidden">
  <div class="card">
   <h2>Saved Practice Sets</h2>
@@ -19,7 +45,18 @@
   <div id="setsList"></div>
  </div>
 </section>
-<section id="historyView" class="view hidden"><div class="card"><h2>Practice History</h2><div id="historyList"></div></div></section>
+<section id="historyView" class="view hidden">
+ <div class="card">
+  <div class="history-head"><div><h2>Practice History</h2><p class="muted">Filter previous checks by time, skill, error type, or result.</p></div><div id="historyCount" class="muted"></div></div>
+  <div class="history-filters">
+   <label>Period<select id="historyDays"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last year</option><option value="0">All time</option></select></label>
+   <label>Skill<select id="historySkill"><option value="">All skills</option></select></label>
+   <label>Error<select id="historyError"><option value="">All errors</option></select></label>
+   <label>Result<select id="historyResult"><option value="all">All</option><option value="correct">Correct</option><option value="incorrect">Needs revision</option></select></label>
+  </div>
+  <div id="historyList"></div>
+ </div>
+</section>
 <section id="settingsView" class="view hidden">
  <div class="card settings-card">
   <h2>Settings</h2>
