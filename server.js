@@ -335,6 +335,19 @@ function curriculumLesson(id){
  return {...l,rules:parseJsonArray(l.rules_json),commonErrors:parseJsonArray(l.common_errors_json),promptPatterns:parseJsonArray(l.prompt_patterns_json),requiredElements:parseJsonArray(l.required_elements_json),avoid:parseJsonArray(l.avoid_json)};
 }
 
+function curriculumStage(stage){
+ const s=db.prepare("SELECT * FROM curriculum_stages WHERE stage=?").get(stage);
+ if(!s) return null;
+ return {...s,generationGuardrails:parseJsonArray(s.generation_guardrails_json)};
+}
+
+function promptLanguageProblem(prompt,lesson){
+ const text=String(prompt||"");
+ if(Number(lesson?.stage)<=9 && !containsChinese(text)) return "prompt must be Simplified Chinese for Stage "+lesson.stage;
+ if(Number(lesson?.stage)>=11 && containsChinese(text)) return "prompt must be English-first with no Chinese for Stage "+lesson.stage;
+ return "";
+}
+
 function chooseLessonSequence(skillSequence,maxStage,forcedLessonId=null){
  const mastery=new Map(lessonMasteryRows().map(x=>[x.id,x]));
  if(forcedLessonId){
@@ -381,14 +394,14 @@ function currentStage(mastery){
 }
 
 
-function exerciseSchemaFor(allowed,count,mode){
+function exerciseSchemaFor(allowed,count,mode,allowedLessonIds=[]){
  return {
   type:"object",additionalProperties:false,
   properties:{exercises:{
    type:"array",minItems:count,maxItems:count,
    items:{type:"object",additionalProperties:false,properties:{
     id:{type:"string"},
-    lessonId:{type:"string"},
+    lessonId:allowedLessonIds.length?{type:"string",enum:allowedLessonIds}:{type:"string"},
     type:{type:"string",enum:[mode]},
     skill:{type:"string",enum:allowed},
     reviewSkills:{type:"array",items:{type:"string"}},
@@ -467,16 +480,18 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
  if(lessonSequence.some(x=>!x)) throw new Error("No curriculum lesson guidance exists for one or more selected skills");
  const instructions=[
   "Create English writing exercises for an 11-year-old sixth-grade ESL student.",
-  "CRITICAL: Every prompt field MUST be written in Simplified Chinese. The student sees the Chinese prompt and writes the English sentence.",
+  "Prompt language MUST follow the assigned curriculum stage. Stages 1-9 use Simplified Chinese; Stage 10 may use a short Chinese or English situation; Stages 11-12 use English-first school-style prompts.",
   "The model field MUST be the natural American English answer.",
   "Never put the English model answer in prompt.",
   "Use ONLY the allowed primary skill IDs.",
   "Test one primary skill per item.",
-  "Give exactly 3 progressive hints.",
+  "Give exactly 3 progressive hints. Hint 1 names the grammar idea without revealing the answer. Hint 2 gives a structure or verb-form clue. Hint 3 gives key words or word order but still does not reveal the full model sentence.",
   "Do not duplicate prompts.",
   "Follow the exact lesson guidance for each numbered item. Do not improvise a different grammar target.",
   "The lessonId field must exactly match the assigned lesson id for that item.",
   "Treat prompt patterns as style examples, not text to copy repeatedly.",
+  "Keep vocabulary easier than the grammar target so the exercise measures writing grammar rather than obscure vocabulary.",
+  "The focus field should name the assigned lesson target in short student-friendly wording.",
   "Return only valid JSON matching the schema."
  ].join(" ");
 
@@ -484,8 +499,8 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
   const batchAllowed=[...new Set(batchSequence)];
   const batchCount=batchSequence.length;
   const batchLessons=lessonSequence.slice(batchStart,batchStart+batchCount);
-  const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
-  const guidance=batchLessons.map((l,i)=>[
+  const format=exerciseSchemaFor(batchAllowed,batchCount,mode,batchLessons.map(x=>x.id));
+  const guidance=batchLessons.map((l,i)=>{const s=curriculumStage(l.stage);return [
    "ITEM "+(i+1),
    "lessonId="+l.id,
    "skill="+l.skill_id,
@@ -496,8 +511,12 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    "common errors to target="+parseJsonArray(l.common_errors_json).join(" | "),
    "prompt-pattern examples="+parseJsonArray(l.prompt_patterns_json).join(" | "),
    "required elements="+parseJsonArray(l.required_elements_json).join(" | "),
-   "avoid="+parseJsonArray(l.avoid_json).join(" | ")
-  ].join("; ")).join("\n");
+   "avoid="+parseJsonArray(l.avoid_json).join(" | "),
+   "stage goal="+(s?.goal||""),
+   "prompt mode="+(s?.prompt_mode||""),
+   "expected output="+(s?.sentence_mode||""),
+   "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
+  ].join("; ")}).join("\n");
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
    ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
@@ -534,13 +553,17 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
   const batchAllowed=[...new Set(batchSequence)];
   const batchCount=batchSequence.length;
   const batchLessons=lessonSequence.slice(batchStart,batchStart+batchCount);
-  const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
-  const guidance=batchLessons.map((l,i)=>[
+  const format=exerciseSchemaFor(batchAllowed,batchCount,mode,batchLessons.map(x=>x.id));
+  const guidance=batchLessons.map((l,i)=>{const s=curriculumStage(l.stage);return [
    "ITEM "+(i+1),"lessonId="+l.id,"skill="+l.skill_id,"lesson="+l.title,"objective="+l.objective,"difficulty="+l.difficulty,
    "rules="+parseJsonArray(l.rules_json).join(" | "),"common errors to target="+parseJsonArray(l.common_errors_json).join(" | "),
    "prompt-pattern examples="+parseJsonArray(l.prompt_patterns_json).join(" | "),"required elements="+parseJsonArray(l.required_elements_json).join(" | "),
-   "avoid="+parseJsonArray(l.avoid_json).join(" | ")
-  ].join("; ")).join("\n");
+   "avoid="+parseJsonArray(l.avoid_json).join(" | "),
+   "stage goal="+(s?.goal||""),
+   "prompt mode="+(s?.prompt_mode||""),
+   "expected output="+(s?.sentence_mode||""),
+   "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
+  ].join("; ")}).join("\n");
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
    ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
@@ -586,6 +609,8 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
        problem="exercise "+(i+1)+" must use lessonId "+assignedLesson?.id+", got "+batch[i]?.lessonId;
        break;
       }
+      const languageProblem=promptLanguageProblem(batch[i]?.prompt,assignedLesson);
+      if(languageProblem){problem="exercise "+(i+1)+" "+languageProblem;break;}
       if(priorPrompts.includes(String(batch[i]?.prompt||"").trim())){
        problem="prompt duplicates an earlier batch: "+batch[i]?.prompt;
        break;
