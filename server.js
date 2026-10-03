@@ -14,6 +14,8 @@ const llmProvider = (process.env.LLM_PROVIDER || "ollama").toLowerCase();
 const ollamaBaseUrl = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
 const ollamaModel = process.env.OLLAMA_WRITING_MODEL || "hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL";
 const ollamaTimeoutMs = Number(process.env.OLLAMA_WRITING_TIMEOUT_SECONDS || 60) * 1000;
+const ollamaGenerationTimeoutMs = Number(process.env.OLLAMA_GENERATION_TIMEOUT_SECONDS || 180) * 1000;
+const ollamaGenerationBatchSize = Math.max(1,Math.min(6,Number(process.env.OLLAMA_GENERATION_BATCH_SIZE || 4)));
 const openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna";
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
@@ -332,7 +334,7 @@ function buildSkillSequence(skills,count){
 async function generateExercises(skills,count,mode,targetSequence=null){
  const allowed=[...new Set(skills.filter(x=>skillMap[x]))];
  if(!allowed.length) throw new Error("No valid curriculum skills were selected");
- const format=exerciseSchemaFor(allowed,count,mode);
+ const sequence=Array.isArray(targetSequence)&&targetSequence.length===count?targetSequence:buildSkillSequence(allowed,count);
  const instructions=[
   "Create English writing exercises for an 11-year-old sixth-grade ESL student.",
   "CRITICAL: Every prompt field MUST be written in Simplified Chinese. The student sees the Chinese prompt and writes the English sentence.",
@@ -344,53 +346,125 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   "Do not duplicate prompts.",
   "Return only valid JSON matching the schema."
  ].join(" ");
- const sequence=Array.isArray(targetSequence)&&targetSequence.length===count?targetSequence:null;
- const baseInput="Mode: "+mode+". Generate exactly "+count+" exercises. Allowed primary skill IDs: "+allowed.join(", ")+". Skill descriptions: "+allowed.map(id=>id+": "+skillMap[id].description).join("; ")+(sequence?" IMPORTANT: exercise primary skills in exact order must be: "+sequence.join(", ")+".":"");
 
- async function callOllama(input){
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ollamaTimeoutMs);
+ async function callOllamaBatch(batchSequence,priorPrompts,retryNote=""){
+  const batchAllowed=[...new Set(batchSequence)];
+  const batchCount=batchSequence.length;
+  const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
+  const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
+   ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
+   ". IMPORTANT: exercise primary skills in exact order must be: "+batchSequence.join(", ")+
+   (priorPrompts.length?". Do not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   retryNote;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),ollamaGenerationTimeoutMs);
   try{
-   const response=await fetch(ollamaBaseUrl+"/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({
-    model:ollamaModel,stream:false,think:false,keep_alive:"10m",format,options:{temperature:0},
-    messages:[{role:"system",content:instructions},{role:"user",content:input}]
-   })});
+   const response=await fetch(ollamaBaseUrl+"/api/chat",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    signal:controller.signal,
+    body:JSON.stringify({
+     model:ollamaModel,stream:false,think:false,keep_alive:"10m",format,
+     options:{temperature:0},
+     messages:[{role:"system",content:instructions},{role:"user",content:input}]
+    })
+   });
    if(!response.ok) throw new Error("Ollama HTTP "+response.status);
    const data=await response.json();
    return JSON.parse(data.message?.content||"{}").exercises;
-  }finally{clearTimeout(timer);}
+  }catch(e){
+   if(e?.name==="AbortError"){
+    throw new Error("Ollama generation timed out after "+Math.round(ollamaGenerationTimeoutMs/1000)+" seconds for a "+batchCount+"-question batch. The local model may still be loading or running slowly.");
+   }
+   throw e;
+  }finally{
+   clearTimeout(timer);
+  }
  }
 
- async function callOpenAI(input){
+ async function callOpenAIBatch(batchSequence,priorPrompts,retryNote=""){
   if(!client) throw new Error("OpenAI fallback unavailable");
-  const r=await client.responses.create({model:openaiModel,reasoning:{effort:"none"},max_output_tokens:Math.min(5000,Math.max(1800,count*220)),instructions,input,text:{format:{type:"json_schema",name:"exercise_set",strict:true,schema:format}}});
+  const batchAllowed=[...new Set(batchSequence)];
+  const batchCount=batchSequence.length;
+  const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
+  const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
+   ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
+   ". IMPORTANT: exercise primary skills in exact order must be: "+batchSequence.join(", ")+
+   (priorPrompts.length?". Do not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   retryNote;
+  const r=await client.responses.create({
+   model:openaiModel,reasoning:{effort:"none"},
+   max_output_tokens:Math.min(3000,Math.max(900,batchCount*260)),
+   instructions,input,
+   text:{format:{type:"json_schema",name:"exercise_set",strict:true,schema:format}}
+  });
   return JSON.parse(r.output_text).exercises;
  }
 
- let lastError="";
- for(let attempt=1;attempt<=3;attempt++){
-  const retryNote=lastError?" Previous output was rejected because: "+lastError+". Correct that exact problem.":"";
-  try{
-   let exercises;
-   if(llmProvider==="openai") exercises=await callOpenAI(baseInput+retryNote);
-   else{
-    try{exercises=await callOllama(baseInput+retryNote);}
-    catch(e){
-     if(llmProvider!=="auto") throw e;
-     console.warn("Ollama generation failed; fallback:",e.message);
-     exercises=await callOpenAI(baseInput+retryNote);
+ async function generateBatch(batchSequence,priorPrompts){
+  const batchAllowed=[...new Set(batchSequence)];
+  const batchCount=batchSequence.length;
+  let lastError="";
+  for(let attempt=1;attempt<=2;attempt++){
+   const retryNote=lastError?" Previous output was rejected because: "+lastError+". Correct that exact problem.":"";
+   try{
+    let batch;
+    if(llmProvider==="openai"){
+     batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote);
+    }else{
+     try{
+      batch=await callOllamaBatch(batchSequence,priorPrompts,retryNote);
+     }catch(e){
+      if(llmProvider!=="auto") throw e;
+      console.warn("Ollama generation batch failed; using OpenAI fallback:",e.message);
+      batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote);
+     }
     }
+    let problem=validateGeneratedExercises(batch,batchAllowed,batchCount,mode);
+    if(!problem){
+     for(let i=0;i<batchCount;i++){
+      if(batch[i]?.skill!==batchSequence[i]){
+       problem="exercise "+(i+1)+" must use skill "+batchSequence[i]+", got "+batch[i]?.skill;
+       break;
+      }
+      if(priorPrompts.includes(String(batch[i]?.prompt||"").trim())){
+       problem="prompt duplicates an earlier batch: "+batch[i]?.prompt;
+       break;
+      }
+     }
+    }
+    if(!problem) return batch;
+    lastError=problem;
+    console.warn("Rejected generated batch:",problem);
+   }catch(e){
+    lastError=e?.message||String(e);
+    if(attempt===2) throw new Error(lastError);
    }
-   let problem=validateGeneratedExercises(exercises,allowed,count,mode);
-   if(!problem&&sequence){for(let i=0;i<count;i++){if(exercises[i]?.skill!==sequence[i]){problem="exercise "+(i+1)+" must use skill "+sequence[i]+", got "+exercises[i]?.skill;break;}}}
-   if(!problem) return exercises;
-   lastError=problem;
-   console.warn("Rejected generated exercise set:",problem);
-  }catch(e){
-   lastError=e?.message||String(e);
-   if(attempt===3) throw e;
+  }
+  throw new Error(lastError||"Exercise generation failed");
+ }
+
+ const all=[];
+ for(let offset=0;offset<count;offset+=ollamaGenerationBatchSize){
+  const batchSequence=sequence.slice(offset,offset+ollamaGenerationBatchSize);
+  const priorPrompts=all.map(x=>String(x.prompt||"").trim());
+  console.log("Generating exercise batch "+(Math.floor(offset/ollamaGenerationBatchSize)+1)+"/"+Math.ceil(count/ollamaGenerationBatchSize)+" ("+batchSequence.length+" questions)");
+  const batch=await generateBatch(batchSequence,priorPrompts);
+  all.push(...batch);
+ }
+
+ all.forEach((q,i)=>{q.id="generated-"+Date.now()+"-"+(i+1);});
+ let problem=validateGeneratedExercises(all,allowed,count,mode);
+ if(!problem){
+  for(let i=0;i<count;i++){
+   if(all[i]?.skill!==sequence[i]){
+    problem="exercise "+(i+1)+" must use skill "+sequence[i]+", got "+all[i]?.skill;
+    break;
+   }
   }
  }
- throw new Error("The local model could not produce a valid Chinese exercise set after 3 attempts: "+lastError);
+ if(problem) throw new Error("Generated set failed final validation: "+problem);
+ return all;
 }
 
 function practiceGroupTitle(mode,skillId,count,date=today()){
@@ -480,8 +554,8 @@ app.post("/api/generate",async(req,res)=>{
    const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get(setKey);
    if(cached){
     const parsed=JSON.parse(cached.exercises_json);
-    let problem=validateGeneratedExercises(parsed,skills,count,mode);
-    if(!problem&&sequence.length===count){for(let i=0;i<count;i++){if(parsed[i]?.skill!==sequence[i]){problem="planner sequence changed";break;}}}
+    const cacheAllowed=mode==="skill"?[requestedSkill]:SKILLS.map(x=>x.id);
+    const problem=validateGeneratedExercises(parsed,cacheAllowed,count,mode);
     if(!problem) return res.json({cached:true,mode,groupId:cached.group_id||null,exercises:parsed});
     db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);
     console.warn("Discarded invalid cached set:",setKey,problem);
@@ -502,15 +576,13 @@ app.get("/api/today",(req,res)=>{
  const practiceCount=getPracticeCount();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
  const sequence=buildTodaySkillSequence(mastery,stage,date,practiceCount);
- const allowed=[...new Set(sequence)];
  let generated=false,groupId=null;
  let exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
  groupId=ensureBasePracticeGroup(exercises.length);
  const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get("today:"+date);
  if(cached){
   const parsed=JSON.parse(cached.exercises_json);
-  let problem=validateGeneratedExercises(parsed,allowed,practiceCount,"today");
-  if(!problem){for(let i=0;i<practiceCount;i++){if(parsed[i]?.skill!==sequence[i]){problem="planner sequence changed";break;}}}
+  const problem=validateGeneratedExercises(parsed,SKILLS.map(x=>x.id),practiceCount,"today");
   if(!problem){exercises=parsed;generated=true;groupId=cached.group_id||null;}
   else{db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);console.warn("Discarded invalid today cache:",problem);}
  }
