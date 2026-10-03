@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { SKILLS, skillMap, statusFromMastery, nextReviewDays } from "./src/curriculum.js";
+import { CURRICULUM_VERSION, CURRICULUM_STAGES, CURRICULUM_LESSONS } from "./src/plan.js";
 import { BASE_EXERCISES } from "./src/exercises.js";
 
 const app = express();
@@ -91,9 +92,82 @@ CREATE TABLE IF NOT EXISTS daily_sessions (
 `);
 
 const cols = db.prepare("PRAGMA table_info(attempts)").all().map(x=>x.name);
-for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"],["error_tag","TEXT"],["session_id","INTEGER"],["session_position","INTEGER"]]) {
+for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"],["error_tag","TEXT"],["session_id","INTEGER"],["session_position","INTEGER"],["lesson_id","TEXT"]]) {
   if (!cols.includes(name)) db.exec(`ALTER TABLE attempts ADD COLUMN ${name} ${type}`);
 }
+db.exec(`
+CREATE TABLE IF NOT EXISTS curriculum_stages (
+ stage INTEGER PRIMARY KEY,
+ title TEXT NOT NULL,
+ goal TEXT NOT NULL,
+ parent_note_zh TEXT,
+ advancement TEXT NOT NULL,
+ prompt_mode TEXT NOT NULL,
+ sentence_mode TEXT NOT NULL,
+ generation_guardrails_json TEXT NOT NULL,
+ curriculum_version INTEGER NOT NULL,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS curriculum_lessons (
+ id TEXT PRIMARY KEY,
+ stage INTEGER NOT NULL,
+ skill_id TEXT NOT NULL,
+ order_in_stage INTEGER NOT NULL,
+ title TEXT NOT NULL,
+ objective TEXT NOT NULL,
+ rules_json TEXT NOT NULL,
+ common_errors_json TEXT NOT NULL,
+ prompt_patterns_json TEXT NOT NULL,
+ required_elements_json TEXT NOT NULL,
+ avoid_json TEXT NOT NULL,
+ difficulty TEXT NOT NULL,
+ curriculum_version INTEGER NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_curriculum_lessons_stage ON curriculum_lessons(stage,order_in_stage);
+CREATE INDEX IF NOT EXISTS idx_curriculum_lessons_skill ON curriculum_lessons(skill_id,stage,order_in_stage);
+CREATE TABLE IF NOT EXISTS lesson_attempts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ attempt_id INTEGER NOT NULL,
+ lesson_id TEXT NOT NULL,
+ skill_id TEXT NOT NULL,
+ success INTEGER NOT NULL,
+ evidence_score REAL,
+ first_try INTEGER,
+ hint_level INTEGER,
+ model_viewed INTEGER,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_attempts_lesson ON lesson_attempts(lesson_id,created_at);
+`);
+
+function seedCurriculumPlan(){
+ const stageUpsert=db.prepare(`INSERT INTO curriculum_stages(stage,title,goal,parent_note_zh,advancement,prompt_mode,sentence_mode,generation_guardrails_json,curriculum_version)
+  VALUES(?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(stage) DO UPDATE SET
+   title=excluded.title,goal=excluded.goal,parent_note_zh=excluded.parent_note_zh,advancement=excluded.advancement,
+   prompt_mode=excluded.prompt_mode,sentence_mode=excluded.sentence_mode,generation_guardrails_json=excluded.generation_guardrails_json,
+   curriculum_version=excluded.curriculum_version,updated_at=CURRENT_TIMESTAMP`);
+ const lessonUpsert=db.prepare(`INSERT INTO curriculum_lessons(id,stage,skill_id,order_in_stage,title,objective,rules_json,common_errors_json,prompt_patterns_json,required_elements_json,avoid_json,difficulty,curriculum_version,enabled)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+  ON CONFLICT(id) DO UPDATE SET
+   stage=excluded.stage,skill_id=excluded.skill_id,order_in_stage=excluded.order_in_stage,title=excluded.title,objective=excluded.objective,
+   rules_json=excluded.rules_json,common_errors_json=excluded.common_errors_json,prompt_patterns_json=excluded.prompt_patterns_json,
+   required_elements_json=excluded.required_elements_json,avoid_json=excluded.avoid_json,difficulty=excluded.difficulty,
+   curriculum_version=excluded.curriculum_version,enabled=1,updated_at=CURRENT_TIMESTAMP`);
+ const run=db.transaction(()=>{
+  db.prepare("UPDATE curriculum_lessons SET enabled=0").run();
+  for(const s of CURRICULUM_STAGES){
+   stageUpsert.run(s.stage,s.title,s.goal,s.parentNoteZh||"",s.advancement,s.promptMode,s.sentenceMode,JSON.stringify(s.generationGuardrails||[]),CURRICULUM_VERSION);
+  }
+  for(const l of CURRICULUM_LESSONS){
+   lessonUpsert.run(l.id,l.stage,l.skillId,l.order,l.title,l.objective,JSON.stringify(l.rules||[]),JSON.stringify(l.commonErrors||[]),JSON.stringify(l.promptPatterns||[]),JSON.stringify(l.requiredElements||[]),JSON.stringify(l.avoid||[]),l.difficulty,CURRICULUM_VERSION);
+  }
+ });
+ run();
+}
+
 db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
  set_key TEXT PRIMARY KEY,
  mode TEXT NOT NULL,
@@ -189,6 +263,8 @@ const today = () => new Date().toLocaleDateString("en-CA");
 const addDays = n => { const d=new Date(); d.setDate(d.getDate()+n); return d.toLocaleDateString("en-CA"); };
 const setState=db.prepare("INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
 const getState=db.prepare("SELECT value FROM app_state WHERE key=?");
+seedCurriculumPlan();
+setState.run("curriculumVersion",String(CURRICULUM_VERSION));
 function getPracticeCount(){
  const n=Number(getState.get("practiceCount")?.value||12);
  return Number.isInteger(n)&&n>=4&&n<=20?n:12;
@@ -228,6 +304,57 @@ function normalizeErrorTag(tag,result){
  return map[raw] ? map[raw] : (ERROR_TAGS.includes(raw) ? raw : "other");
 }
 
+function parseJsonArray(value){
+ try{return Array.isArray(value)?value:JSON.parse(value||"[]");}catch{return [];}
+}
+
+function lessonMasteryRows(){
+ const rows=db.prepare("SELECT id,stage,skill_id,order_in_stage,title,objective,rules_json,common_errors_json,prompt_patterns_json,required_elements_json,avoid_json,difficulty FROM curriculum_lessons WHERE enabled=1 ORDER BY stage,order_in_stage,id").all();
+ return rows.map(l=>{
+  const ev=db.prepare("SELECT success,evidence_score,first_try,hint_level,model_viewed FROM lesson_attempts WHERE lesson_id=? ORDER BY id DESC LIMIT 10").all(l.id);
+  const attempts=ev.length;
+  let score=0,independentCorrect=0,assistedCorrect=0;
+  if(attempts){
+   const weights=ev.map((_,i)=>Math.max(1,10-i));
+   const values=ev.map(r=>r.evidence_score==null?(r.success?1:0):Number(r.evidence_score));
+   score=Math.round(values.reduce((a,v,i)=>a+v*weights[i],0)/weights.reduce((a,b)=>a+b,0)*100);
+   independentCorrect=ev.filter(r=>r.success&&r.first_try===1&&(r.hint_level||0)===0&&(r.model_viewed||0)===0).length;
+   assistedCorrect=ev.filter(r=>r.success&&!((r.first_try===1)&&(r.hint_level||0)===0&&(r.model_viewed||0)===0)).length;
+  }
+  return {...l,
+   rules:parseJsonArray(l.rules_json),commonErrors:parseJsonArray(l.common_errors_json),promptPatterns:parseJsonArray(l.prompt_patterns_json),
+   requiredElements:parseJsonArray(l.required_elements_json),avoid:parseJsonArray(l.avoid_json),
+   attempts,score,status:statusFromMastery(score,attempts),independentCorrect,assistedCorrect
+  };
+ });
+}
+
+function curriculumLesson(id){
+ const l=db.prepare("SELECT * FROM curriculum_lessons WHERE id=? AND enabled=1").get(id);
+ if(!l) return null;
+ return {...l,rules:parseJsonArray(l.rules_json),commonErrors:parseJsonArray(l.common_errors_json),promptPatterns:parseJsonArray(l.prompt_patterns_json),requiredElements:parseJsonArray(l.required_elements_json),avoid:parseJsonArray(l.avoid_json)};
+}
+
+function chooseLessonSequence(skillSequence,maxStage,forcedLessonId=null){
+ const mastery=new Map(lessonMasteryRows().map(x=>[x.id,x]));
+ if(forcedLessonId){
+  const forced=curriculumLesson(forcedLessonId);
+  if(!forced) throw new Error("Unknown lesson: "+forcedLessonId);
+  if(skillSequence.some(x=>x!==forced.skill_id)) throw new Error("Forced lesson does not match selected skill");
+  return skillSequence.map(()=>forced);
+ }
+ const counters={};
+ return skillSequence.map(skillId=>{
+  let candidates=db.prepare("SELECT * FROM curriculum_lessons WHERE skill_id=? AND enabled=1 AND stage<=? ORDER BY stage,order_in_stage,id").all(skillId,maxStage);
+  if(!candidates.length) candidates=db.prepare("SELECT * FROM curriculum_lessons WHERE skill_id=? AND enabled=1 ORDER BY stage,order_in_stage,id").all(skillId);
+  if(!candidates.length) return null;
+  candidates=candidates.map(x=>({...x,mastery:mastery.get(x.id)||{attempts:0,score:0}}))
+   .sort((a,b)=>(a.mastery.attempts-b.mastery.attempts)||(a.mastery.score-b.mastery.score)||(a.stage-b.stage)||(a.order_in_stage-b.order_in_stage));
+  const n=counters[skillId]||0;counters[skillId]=n+1;
+  return candidates[n%candidates.length];
+ });
+}
+
 function masteryRows(){
  return SKILLS.map(s=>{
    const rows=db.prepare("SELECT success,evidence_score,first_try,hint_level,model_viewed FROM skill_attempts WHERE skill_id=? ORDER BY id DESC LIMIT 10").all(s.id);
@@ -261,6 +388,7 @@ function exerciseSchemaFor(allowed,count,mode){
    type:"array",minItems:count,maxItems:count,
    items:{type:"object",additionalProperties:false,properties:{
     id:{type:"string"},
+    lessonId:{type:"string"},
     type:{type:"string",enum:[mode]},
     skill:{type:"string",enum:allowed},
     reviewSkills:{type:"array",items:{type:"string"}},
@@ -268,7 +396,7 @@ function exerciseSchemaFor(allowed,count,mode){
     focus:{type:"string"},
     hints:{type:"array",minItems:3,maxItems:3,items:{type:"string"}},
     model:{type:"string"}
-   },required:["id","type","skill","reviewSkills","prompt","focus","hints","model"]}
+   },required:["id","lessonId","type","skill","reviewSkills","prompt","focus","hints","model"]}
   }},
   required:["exercises"]
  };
@@ -331,10 +459,12 @@ function buildSkillSequence(skills,count){
  return cyclePick([...new Set(skills.filter(x=>skillMap[x]))],count,SKILLS.slice(0,1).map(x=>x.id));
 }
 
-async function generateExercises(skills,count,mode,targetSequence=null){
+async function generateExercises(skills,count,mode,targetSequence=null,{maxStage=12,forcedLessonId=null}={}){
  const allowed=[...new Set(skills.filter(x=>skillMap[x]))];
  if(!allowed.length) throw new Error("No valid curriculum skills were selected");
  const sequence=Array.isArray(targetSequence)&&targetSequence.length===count?targetSequence:buildSkillSequence(allowed,count);
+ const lessonSequence=chooseLessonSequence(sequence,maxStage,forcedLessonId);
+ if(lessonSequence.some(x=>!x)) throw new Error("No curriculum lesson guidance exists for one or more selected skills");
  const instructions=[
   "Create English writing exercises for an 11-year-old sixth-grade ESL student.",
   "CRITICAL: Every prompt field MUST be written in Simplified Chinese. The student sees the Chinese prompt and writes the English sentence.",
@@ -344,17 +474,34 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   "Test one primary skill per item.",
   "Give exactly 3 progressive hints.",
   "Do not duplicate prompts.",
+  "Follow the exact lesson guidance for each numbered item. Do not improvise a different grammar target.",
+  "The lessonId field must exactly match the assigned lesson id for that item.",
+  "Treat prompt patterns as style examples, not text to copy repeatedly.",
   "Return only valid JSON matching the schema."
  ].join(" ");
 
- async function callOllamaBatch(batchSequence,priorPrompts,retryNote=""){
+ async function callOllamaBatch(batchSequence,priorPrompts,retryNote="",batchStart=0){
   const batchAllowed=[...new Set(batchSequence)];
   const batchCount=batchSequence.length;
+  const batchLessons=lessonSequence.slice(batchStart,batchStart+batchCount);
   const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
+  const guidance=batchLessons.map((l,i)=>[
+   "ITEM "+(i+1),
+   "lessonId="+l.id,
+   "skill="+l.skill_id,
+   "lesson="+l.title,
+   "objective="+l.objective,
+   "difficulty="+l.difficulty,
+   "rules="+parseJsonArray(l.rules_json).join(" | "),
+   "common errors to target="+parseJsonArray(l.common_errors_json).join(" | "),
+   "prompt-pattern examples="+parseJsonArray(l.prompt_patterns_json).join(" | "),
+   "required elements="+parseJsonArray(l.required_elements_json).join(" | "),
+   "avoid="+parseJsonArray(l.avoid_json).join(" | ")
+  ].join("; ")).join("\n");
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
-   ". IMPORTANT: exercise primary skills in exact order must be: "+batchSequence.join(", ")+
-   (priorPrompts.length?". Do not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
+   (priorPrompts.length?"\nDo not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
    retryNote;
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),ollamaGenerationTimeoutMs);
@@ -382,15 +529,22 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   }
  }
 
- async function callOpenAIBatch(batchSequence,priorPrompts,retryNote=""){
+ async function callOpenAIBatch(batchSequence,priorPrompts,retryNote="",batchStart=0){
   if(!client) throw new Error("OpenAI fallback unavailable");
   const batchAllowed=[...new Set(batchSequence)];
   const batchCount=batchSequence.length;
+  const batchLessons=lessonSequence.slice(batchStart,batchStart+batchCount);
   const format=exerciseSchemaFor(batchAllowed,batchCount,mode);
+  const guidance=batchLessons.map((l,i)=>[
+   "ITEM "+(i+1),"lessonId="+l.id,"skill="+l.skill_id,"lesson="+l.title,"objective="+l.objective,"difficulty="+l.difficulty,
+   "rules="+parseJsonArray(l.rules_json).join(" | "),"common errors to target="+parseJsonArray(l.common_errors_json).join(" | "),
+   "prompt-pattern examples="+parseJsonArray(l.prompt_patterns_json).join(" | "),"required elements="+parseJsonArray(l.required_elements_json).join(" | "),
+   "avoid="+parseJsonArray(l.avoid_json).join(" | ")
+  ].join("; ")).join("\n");
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
-   ". IMPORTANT: exercise primary skills in exact order must be: "+batchSequence.join(", ")+
-   (priorPrompts.length?". Do not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
+   (priorPrompts.length?"\nDo not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
    retryNote;
   const r=await client.responses.create({
    model:openaiModel,reasoning:{effort:"none"},
@@ -401,7 +555,7 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   return JSON.parse(r.output_text).exercises;
  }
 
- async function generateBatch(batchSequence,priorPrompts){
+ async function generateBatch(batchSequence,priorPrompts,batchStart){
   const batchAllowed=[...new Set(batchSequence)];
   const batchCount=batchSequence.length;
   let lastError="";
@@ -410,21 +564,26 @@ async function generateExercises(skills,count,mode,targetSequence=null){
    try{
     let batch;
     if(llmProvider==="openai"){
-     batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote);
+     batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
     }else{
      try{
-      batch=await callOllamaBatch(batchSequence,priorPrompts,retryNote);
+      batch=await callOllamaBatch(batchSequence,priorPrompts,retryNote,batchStart);
      }catch(e){
       if(llmProvider!=="auto") throw e;
       console.warn("Ollama generation batch failed; using OpenAI fallback:",e.message);
-      batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote);
+      batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
      }
     }
     let problem=validateGeneratedExercises(batch,batchAllowed,batchCount,mode);
     if(!problem){
      for(let i=0;i<batchCount;i++){
+      const assignedLesson=lessonSequence[batchStart+i];
       if(batch[i]?.skill!==batchSequence[i]){
        problem="exercise "+(i+1)+" must use skill "+batchSequence[i]+", got "+batch[i]?.skill;
+       break;
+      }
+      if(batch[i]?.lessonId!==assignedLesson?.id){
+       problem="exercise "+(i+1)+" must use lessonId "+assignedLesson?.id+", got "+batch[i]?.lessonId;
        break;
       }
       if(priorPrompts.includes(String(batch[i]?.prompt||"").trim())){
@@ -449,7 +608,7 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   const batchSequence=sequence.slice(offset,offset+ollamaGenerationBatchSize);
   const priorPrompts=all.map(x=>String(x.prompt||"").trim());
   console.log("Generating exercise batch "+(Math.floor(offset/ollamaGenerationBatchSize)+1)+"/"+Math.ceil(count/ollamaGenerationBatchSize)+" ("+batchSequence.length+" questions)");
-  const batch=await generateBatch(batchSequence,priorPrompts);
+  const batch=await generateBatch(batchSequence,priorPrompts,offset);
   all.push(...batch);
  }
 
@@ -459,6 +618,10 @@ async function generateExercises(skills,count,mode,targetSequence=null){
   for(let i=0;i<count;i++){
    if(all[i]?.skill!==sequence[i]){
     problem="exercise "+(i+1)+" must use skill "+sequence[i]+", got "+all[i]?.skill;
+    break;
+   }
+   if(all[i]?.lessonId!==lessonSequence[i]?.id){
+    problem="exercise "+(i+1)+" must use lessonId "+lessonSequence[i]?.id+", got "+all[i]?.lessonId;
     break;
    }
   }
@@ -533,15 +696,25 @@ app.post("/api/settings",(req,res)=>{
  res.json({ok:true,practiceCount});
 });
 
-app.get("/api/plan",(req,res)=>{const mastery=masteryRows();res.json({currentStage:currentStage(mastery),skills:mastery});});
+app.get("/api/plan",(req,res)=>{
+ const skills=masteryRows();
+ const lessons=lessonMasteryRows();
+ const stages=db.prepare("SELECT * FROM curriculum_stages ORDER BY stage").all().map(s=>({
+  stage:s.stage,title:s.title,goal:s.goal,parentNoteZh:s.parent_note_zh,advancement:s.advancement,promptMode:s.prompt_mode,sentenceMode:s.sentence_mode,
+  generationGuardrails:parseJsonArray(s.generation_guardrails_json),
+  lessons:lessons.filter(l=>l.stage===s.stage)
+ }));
+ res.json({curriculumVersion:CURRICULUM_VERSION,currentStage:currentStage(skills),skills,stages});
+});
 
 app.post("/api/generate",async(req,res)=>{
  try{
-  const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), force=Boolean(req.body?.force);
+  const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), requestedLesson=String(req.body?.lessonId||""), force=Boolean(req.body?.force);
   const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=getPracticeCount(),setKey="",sequence=[];
   if(mode==="skill"){
    if(!skillMap[requestedSkill]) return res.status(400).json({error:"Unknown skill"});
-   skills=[requestedSkill];sequence=buildSkillSequence(skills,count);setKey="skill:"+requestedSkill+":"+date;
+   skills=[requestedSkill];sequence=buildSkillSequence(skills,count);setKey="skill:"+requestedSkill+":"+(requestedLesson||"all")+":"+date;
+   if(requestedLesson){const lesson=curriculumLesson(requestedLesson);if(!lesson||lesson.skill_id!==requestedSkill)return res.status(400).json({error:"Lesson does not match skill"});}
   }else if(mode==="review"){
    skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id).filter(x=>skillMap[x]);
    if(!skills.length) return res.status(400).json({error:"No reviews are due today"});
@@ -561,8 +734,9 @@ app.post("/api/generate",async(req,res)=>{
     console.warn("Discarded invalid cached set:",setKey,problem);
    }
   }
-  const exercises=await generateExercises(skills,count,mode,sequence);
-  const groupId=archivePracticeGroup(mode,requestedSkill||null,exercises);
+  const exercises=await generateExercises(skills,count,mode,sequence,{maxStage:stage,forcedLessonId:requestedLesson||null});
+  const forcedLesson=requestedLesson?curriculumLesson(requestedLesson):null;
+  const groupId=archivePracticeGroup(mode,requestedSkill||null,exercises,{title:forcedLesson?(forcedLesson.title+" Practice · "+date+" · "+exercises.length+" questions"):null});
   db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json,group_id) VALUES(?,?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,skill_id=excluded.skill_id,group_id=excluded.group_id,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises),groupId);
   res.json({cached:false,mode,groupId,exercises});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
@@ -801,7 +975,7 @@ app.get("/api/history",(req,res)=>{
  if(mode){where.push("COALESCE(ps.mode,a.exercise_type)=?");params.push(mode);}
  if(days>0){where.push("a.session_date>=date('now',?)");params.push("-"+days+" days");}
  const rows=db.prepare(`SELECT a.id,a.session_date,a.exercise_id,a.exercise_type,a.skill_id,a.prompt,a.answer,a.correct,a.error_tag,
-  a.feedback,a.suggestion,a.better_sentence,a.created_at,a.session_id,a.session_position,
+  a.feedback,a.suggestion,a.better_sentence,a.created_at,a.session_id,a.session_position,a.lesson_id,
   sa.success,sa.evidence_score,sa.first_try,sa.hint_level,sa.model_viewed,
   ps.title session_title,ps.mode session_mode
   FROM attempts a
@@ -837,7 +1011,7 @@ app.post("/api/state",(req,res)=>{
 
 app.post("/api/check",async(req,res)=>{
  try{
-  const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
+  const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,lessonId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
   if(exerciseId===undefined||!prompt||!answer||!skillId) return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
   const skill=skillMap[skillId];
   const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
@@ -855,9 +1029,10 @@ app.post("/api/check",async(req,res)=>{
    else if(firstTry) evidence=1;
    else evidence=.8;
   }
-  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position));
+  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position,lesson_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position),lessonId||null);
   const aid=Number(info.lastInsertRowid);
   db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+  if(lessonId&&curriculumLesson(lessonId)) db.prepare("INSERT INTO lesson_attempts(attempt_id,lesson_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?,?)").run(aid,lessonId,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
 
   if(sessionItem){
    const newAttemptCount=previousAttempts+1;
