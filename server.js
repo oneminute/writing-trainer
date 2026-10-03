@@ -63,6 +63,7 @@ const dataDir = path.join(__dirname, "data");
 fs.mkdirSync(dataDir, { recursive: true });
 const db = new Database(path.join(dataDir, "writing-trainer.db"));
 db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS attempts (
@@ -97,6 +98,32 @@ db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
  exercises_json TEXT NOT NULL,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`);
+db.exec(`
+CREATE TABLE IF NOT EXISTS practice_groups (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ mode TEXT NOT NULL,
+ skill_id TEXT,
+ title TEXT NOT NULL,
+ exercise_count INTEGER NOT NULL,
+ archive_key TEXT UNIQUE,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS practice_group_items (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ group_id INTEGER NOT NULL,
+ position INTEGER NOT NULL,
+ exercise_id TEXT,
+ skill_id TEXT,
+ prompt TEXT NOT NULL,
+ focus TEXT,
+ model TEXT,
+ exercise_json TEXT NOT NULL,
+ FOREIGN KEY(group_id) REFERENCES practice_groups(id) ON DELETE CASCADE,
+ UNIQUE(group_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_practice_groups_created ON practice_groups(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_practice_items_group ON practice_group_items(group_id, position);
+`);
 db.exec("CREATE INDEX IF NOT EXISTS idx_skill_attempts_skill ON skill_attempts(skill_id, created_at)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_attempts_date ON attempts(session_date, id)");
 
@@ -251,6 +278,40 @@ async function generateExercises(skills,count,mode){
  throw new Error("The local model could not produce a valid Chinese exercise set after 3 attempts: "+lastError);
 }
 
+function practiceGroupTitle(mode,skillId,count,date=today()){
+ if(mode==="skill") return (skillMap[skillId]?.name||skillId||"Skill")+" Practice · "+date+" · "+count+" questions";
+ if(mode==="review") return "Review Practice · "+date+" · "+count+" questions";
+ return "Today Practice · "+date+" · "+count+" questions";
+}
+
+function archivePracticeGroup(mode,skillId,exercises,{archiveKey=null,title=null}={}){
+ const run=db.transaction(()=>{
+  const info=db.prepare("INSERT INTO practice_groups(mode,skill_id,title,exercise_count,archive_key) VALUES(?,?,?,?,?)").run(
+   mode,skillId||null,title||practiceGroupTitle(mode,skillId,exercises.length),exercises.length,archiveKey
+  );
+  const groupId=Number(info.lastInsertRowid);
+  const insert=db.prepare("INSERT INTO practice_group_items(group_id,position,exercise_id,skill_id,prompt,focus,model,exercise_json) VALUES(?,?,?,?,?,?,?,?)");
+  exercises.forEach((q,i)=>insert.run(groupId,i,String(q.id||""),q.skill||null,String(q.prompt||""),String(q.focus||""),String(q.model||""),JSON.stringify(q)));
+  return groupId;
+ });
+ return run();
+}
+
+function importExistingGeneratedSets(){
+ const rows=db.prepare("SELECT set_key,mode,skill_id,exercises_json,created_at FROM generated_sets ORDER BY created_at").all();
+ const exists=db.prepare("SELECT id FROM practice_groups WHERE archive_key=?");
+ for(const row of rows){
+  const archiveKey="generated_sets:"+row.set_key;
+  if(exists.get(archiveKey)) continue;
+  try{
+   const exercises=JSON.parse(row.exercises_json);
+   if(!Array.isArray(exercises)||!exercises.length) continue;
+   archivePracticeGroup(row.mode,row.skill_id,exercises,{archiveKey,title:practiceGroupTitle(row.mode,row.skill_id,exercises.length,row.created_at?.slice(0,10)||today())});
+  }catch(e){console.warn("Could not import cached practice set",row.set_key,e.message);}
+ }
+}
+importExistingGeneratedSets();
+
 app.get("/api/settings",(req,res)=>{
  res.json({practiceCount:getPracticeCount(),minPracticeCount:4,maxPracticeCount:20});
 });
@@ -276,7 +337,8 @@ app.post("/api/generate",async(req,res)=>{
   if(!force){const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get(setKey);if(cached){const parsed=JSON.parse(cached.exercises_json);const problem=validateGeneratedExercises(parsed,skills,count,mode);if(!problem)return res.json({cached:true,mode,exercises:parsed});db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);console.warn("Discarded invalid cached set:",setKey,problem);}}
   const exercises=await generateExercises(skills,count,mode);
   db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json) VALUES(?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises));
-  res.json({cached:false,mode,exercises});
+  const groupId=archivePracticeGroup(mode,requestedSkill||null,exercises);
+  res.json({cached:false,mode,groupId,exercises});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
 });
 
@@ -309,6 +371,20 @@ app.get("/api/progress",(req,res)=>{
  const mastery=masteryRows();
  const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
  res.json({mastery,stage:currentStage(mastery),totals});
+});
+
+app.get("/api/practice-groups",(req,res)=>{
+ const groups=db.prepare("SELECT id,mode,skill_id,title,exercise_count,created_at FROM practice_groups ORDER BY id DESC LIMIT 300").all();
+ res.json({groups:groups.map(g=>({...g,skillName:g.skill_id?(skillMap[g.skill_id]?.name||g.skill_id):null}))});
+});
+
+app.get("/api/practice-groups/:id",(req,res)=>{
+ const id=Number(req.params.id);
+ if(!Number.isInteger(id)||id<1) return res.status(400).json({error:"Invalid practice group id"});
+ const group=db.prepare("SELECT id,mode,skill_id,title,exercise_count,created_at FROM practice_groups WHERE id=?").get(id);
+ if(!group) return res.status(404).json({error:"Practice group not found"});
+ const items=db.prepare("SELECT exercise_json FROM practice_group_items WHERE group_id=? ORDER BY position").all(id);
+ res.json({group:{...group,skillName:group.skill_id?(skillMap[group.skill_id]?.name||group.skill_id):null},exercises:items.map(x=>JSON.parse(x.exercise_json))});
 });
 
 app.get("/api/history",(req,res)=>{
