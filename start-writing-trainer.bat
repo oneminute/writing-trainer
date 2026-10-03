@@ -22,7 +22,7 @@ if not exist ".env" (
     copy /Y ".env.example" ".env" >nul
     echo [SETUP] Created .env from .env.example
     echo.
-    echo IMPORTANT: Open .env and add your OPENAI_API_KEY.
+    echo IMPORTANT: Review LLM_PROVIDER and Ollama settings in .env.
     start "" notepad ".env"
     echo Save the file, then press any key to continue.
     pause >nul
@@ -39,13 +39,7 @@ if not exist "node_modules" (
   )
 )
 
-findstr /C:"OPENAI_API_KEY=your_api_key_here" ".env" >nul 2>nul
-if not errorlevel 1 (
-  echo [ERROR] OPENAI_API_KEY has not been configured in .env.
-  start "" notepad ".env"
-  pause
-  exit /b 1
-)
+
 
 echo [START] Starting Writing Trainer on port 5178...
 start "" http://localhost:5178
