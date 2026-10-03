@@ -55,7 +55,11 @@ try{
  assert(today.groupId,"Today should have a saved practice group");
 
  const plan=await json("/api/plan");
- assert(Array.isArray(plan.skills)&&plan.skills.length>0,"Plan skills missing");
+ assert(plan.curriculumVersion>=2,"Curriculum version missing");
+ assert(Array.isArray(plan.stages)&&plan.stages.length===12,"Detailed 12-stage plan missing");
+ const planLessons=plan.stages.flatMap(s=>s.lessons||[]);
+ assert(planLessons.length>=40,"Detailed lesson plan is too small");
+ assert(planLessons.every(x=>Array.isArray(x.rules)&&Array.isArray(x.commonErrors)&&Array.isArray(x.promptPatterns)),"Lesson guidance fields missing");
 
  const progress=await json("/api/progress");
  assert(progress.stageProgress&&typeof progress.stageProgress.percent==="number","Progress dashboard missing stageProgress");
@@ -77,7 +81,7 @@ try{
  const active=await json("/api/practice-groups/"+today.groupId+"/active-session");
  assert(active.session&&active.session.id===session.session.id,"Active session resume lookup failed");
 
- console.log("Smoke test passed: settings, today, plan, progress, history, sets, session persistence.");
+ console.log("Smoke test passed: settings, detailed curriculum plan, today, progress, history, sets, session persistence.");
 } finally {
  child.kill();
  await new Promise(r=>setTimeout(r,100));
