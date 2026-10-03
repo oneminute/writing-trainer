@@ -344,8 +344,8 @@ async function loadSets(){
  const d=await get("/api/practice-groups");
  $("setsList").innerHTML=d.groups.length?d.groups.map(g=>
   '<div class="set-card" data-set-id="'+g.id+'">'+
-   '<div class="set-main"><div><div class="set-title">'+(g.favorite?'★ ':'')+esc(g.title)+'</div><small>'+esc(g.mode)+' • '+g.exercise_count+' questions • '+esc((g.created_at||"").replace("T"," ").slice(0,16))+(g.session_count?' • '+g.session_count+' sessions':'')+(g.last_score!=null?' • last '+g.last_score+'%':'')+'</small></div>'+
-   '<div class="set-actions"><button data-set-action="practice">Practice Again</button><button data-set-action="view">View</button><button data-set-action="favorite">'+(g.favorite?'Unfavorite':'Favorite')+'</button><button data-set-action="rename">Rename</button><button data-set-action="delete">Delete</button></div></div>'+
+   '<div class="set-main"><div><div class="set-title">'+(g.favorite?"★ ":"")+esc(g.title)+'</div><small>'+esc(g.mode)+' • '+g.exercise_count+' questions • '+esc((g.created_at||"").replace("T"," ").slice(0,16))+(g.session_count?' • '+g.session_count+' sessions':"")+(g.last_score!=null?' • last '+g.last_score+"%":"")+'</small></div>'+
+   '<div class="set-actions">'+(g.active_session_id?'<button class="primary" data-set-action="resume" data-session-id="'+g.active_session_id+'">Resume</button>':"")+'<button data-set-action="practice">Practice Again</button><button data-set-action="view">View</button><button data-set-action="favorite">'+(g.favorite?"Unfavorite":"Favorite")+'</button><button data-set-action="rename">Rename</button><button data-set-action="delete">Delete</button></div></div>'+
    '<div class="set-detail hidden" id="set-detail-'+g.id+'"></div>'+
   '</div>'
  ).join(""):'<p class="muted">No saved practice sets yet.</p>';
@@ -354,6 +354,12 @@ async function loadSets(){
 async function handleSetAction(button){
  const card=button.closest("[data-set-id]"),id=Number(card.dataset.setId),action=button.dataset.setAction;
  try{
+  if(action==="resume"){
+   button.disabled=true;button.textContent="Opening...";
+   const payload=await get("/api/sessions/"+button.dataset.sessionId);
+   activateView("today");
+   applySession(payload,{title:payload.session.title,meta:"Resumed saved practice • "+payload.items.length+" questions"});
+  }else
   if(action==="practice"){
    button.disabled=true;button.textContent="Opening...";
    const payload=await post("/api/practice-groups/"+id+"/start",{});
