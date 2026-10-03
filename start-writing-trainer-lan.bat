@@ -13,7 +13,7 @@ if errorlevel 1 (
 if not exist ".env" (
   copy /Y ".env.example" ".env" >nul
   start "" notepad ".env"
-  echo Add your OPENAI_API_KEY, save .env, then press any key.
+  echo Review .env settings, save the file, then press any key.
   pause >nul
 )
 
