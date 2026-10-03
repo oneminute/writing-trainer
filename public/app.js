@@ -248,11 +248,79 @@ function showSessionReport(payload){
   '</div><p class="muted">This session is saved. You can practice the same set again later from Sets.</p>';
 }
 
+function attemptCard(a){
+ const evidence=a.evidence_score==null?"—":Math.round(Number(a.evidence_score)*100)+"%";
+ const assistance=[];
+ if(Number(a.hint_level||0)>0) assistance.push("Hint "+a.hint_level);
+ if(Number(a.model_viewed||0)===1) assistance.push("Model viewed");
+ if(Number(a.first_try||0)===1) assistance.push("First try");
+ return '<div class="attempt-card" data-attempt-id="'+a.id+'">'+
+  '<div class="attempt-summary"><div><b>'+(a.correct?"✓ ":"△ ")+esc(a.answer||"")+'</b><small>'+esc(a.session_date||a.created_at||"")+' • '+esc(a.skill_id||"legacy")+(a.error_tag&&a.error_tag!=="none"?' • '+esc(a.error_tag):'')+'</small></div>'+
+  '<button data-history-toggle="'+a.id+'">Details</button></div>'+
+  '<div class="attempt-detail hidden" id="attempt-detail-'+a.id+'">'+
+   '<p><b>Prompt:</b> '+esc(a.prompt||"")+'</p>'+
+   '<p><b>Feedback:</b> '+esc(a.feedback||"")+'</p>'+
+   '<p><b>Suggestion:</b> '+esc(a.suggestion||"")+'</p>'+
+   '<p><b>Better sentence:</b> '+esc(a.better_sentence||"")+'</p>'+
+   '<p class="muted">Evidence '+evidence+(assistance.length?' • '+esc(assistance.join(" • ")):'')+'</p>'+
+  '</div></div>';
+}
+
 async function loadProgress(){
  const d=await get("/api/progress");
- $("stageText").innerHTML='Current curriculum stage: <b>'+d.stage+'</b> • Completed sessions: <b>'+(d.sessions?.completed||0)+'</b> / '+(d.sessions?.total||0)+
-  (d.errors?.length?'<br>Current review issues: '+d.errors.map(x=>esc(x.error)+" ("+x.count+")").join(", "):"");
- $("skillList").innerHTML=d.mastery.map(s=>'<div class="skill-row"><div><b>'+esc(s.name)+'</b><small>Stage '+s.stage+' • '+esc(s.status)+' • independent '+s.independentCorrect+' • assisted '+s.assistedCorrect+'</small></div><div class="skillbar"><i style="width:'+s.score+'%"></i></div><strong>'+s.score+'%</strong></div>').join("");
+ const p=d.stageProgress||{};
+ $("stageText").innerHTML='Current curriculum stage: <b>'+d.stage+'</b> • Completed sessions: <b>'+(d.sessions?.completed||0)+'</b> / '+(d.sessions?.total||0);
+
+ $("progressSummary").innerHTML=
+  '<div class="dash-card"><span>Last 7 days</span><b>'+d.last7.questions+'</b><small>questions attempted</small></div>'+
+  '<div class="dash-card"><span>7-day independent</span><b>'+d.last7.firstTryRate+'%</b><small>first-try accuracy</small></div>'+
+  '<div class="dash-card"><span>Last 30 days</span><b>'+d.last30.questions+'</b><small>questions attempted</small></div>'+
+  '<div class="dash-card"><span>30-day errors</span><b>'+d.last30.errors+'</b><small>recorded error checks</small></div>'+
+  '<div class="dash-card"><span>Hints · 30 days</span><b>'+d.last30.hintUsed+'</b><small>questions using hints</small></div>'+
+  '<div class="dash-card"><span>Model answers · 30 days</span><b>'+d.last30.modelViewed+'</b><small>questions opened</small></div>';
+
+ $("stageProgress").innerHTML=
+  '<div class="stage-progress-head"><div><b>Stage '+p.stage+'</b><div class="muted">'+p.stable+' / '+p.total+' skills at 75%+</div></div><strong>'+p.percent+'%</strong></div>'+
+  '<div class="stage-meter"><i style="width:'+p.percent+'%"></i></div>'+
+  (p.blockers?.length?'<h3>Skills still blocking the next stage</h3><div class="blocker-list">'+p.blockers.map(x=>'<button class="blocker" data-skill-detail="'+x.id+'">'+esc(x.name)+' · '+x.score+'%</button>').join("")+'</div>':'<p class="result ok">Stage requirements are currently satisfied.</p>');
+
+ if(d.trend?.length){
+  const max=Math.max(...d.trend.map(x=>Number(x.checks||0)),1);
+  $("trendList").innerHTML=d.trend.map(x=>{
+   const width=Math.max(4,Math.round(Number(x.checks||0)/max*100));
+   return '<div class="trend-row"><span>'+esc(x.date)+'</span><div class="trend-track"><i style="width:'+width+'%"></i></div><small>'+x.checks+' checks • '+x.correct+' correct • '+x.independent_correct+' independent • '+x.errors+' errors</small></div>';
+  }).join("");
+ }else $("trendList").innerHTML='<p class="muted">No recent practice data yet.</p>';
+
+ $("errorList").innerHTML=d.errors?.length?d.errors.map(x=>'<button class="error-chip" data-error-tag="'+esc(x.error)+'"><b>'+esc(x.error.replaceAll("_"," "))+'</b><span>'+x.count+'</span></button>').join(""):'<p class="muted">No recurring errors recorded in the last 30 days.</p>';
+ $("errorDetail").className="drilldown hidden";
+
+ $("skillList").innerHTML=d.mastery.map(s=>'<button class="skill-row skill-button" data-skill-detail="'+s.id+'"><div><b>'+esc(s.name)+'</b><small>Stage '+s.stage+' • '+esc(s.status)+' • independent '+s.independentCorrect+' • assisted '+s.assistedCorrect+'</small></div><div class="skillbar"><i style="width:'+s.score+'%"></i></div><strong>'+s.score+'%</strong></button>').join("");
+ $("skillDetail").className="drilldown hidden";
+}
+
+async function showErrorDetail(tag){
+ const box=$("errorDetail");
+ box.className="drilldown";
+ box.innerHTML='<p class="muted">Loading '+esc(tag.replaceAll("_"," "))+'…</p>';
+ try{
+  const d=await get("/api/errors/"+encodeURIComponent(tag)+"?days=30");
+  box.innerHTML='<div class="drill-head"><div><h3>'+esc(tag.replaceAll("_"," "))+'</h3><p class="muted">'+d.count+' records in the last '+d.days+' days'+(d.bySkill?.length?' • '+d.bySkill.map(x=>esc(x.skill_id)+" "+x.count).join(", "):'')+'</p></div><button data-close-drill="error">Close</button></div>'+
+   (d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No matching attempts.</p>');
+ }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+'</div>';}
+}
+
+async function showSkillDetail(id){
+ const box=$("skillDetail");
+ box.className="drilldown";
+ box.innerHTML='<p class="muted">Loading skill details…</p>';
+ try{
+  const d=await get("/api/skills/"+encodeURIComponent(id));
+  const s=d.skill;
+  box.innerHTML='<div class="drill-head"><div><h3>'+esc(s.name)+'</h3><p class="muted">'+esc(s.description)+' • '+esc(s.status)+' • '+s.score+'% mastery • '+s.attempts+' recent evidence records</p></div><div class="actions compact"><button data-skill-practice="'+s.id+'" class="primary">Practice this skill</button><button data-close-drill="skill">Close</button></div></div>'+
+   (d.errors?.length?'<p><b>Error patterns:</b> '+d.errors.map(x=>esc(x.error)+" ("+x.count+")").join(", ")+'</p>':'<p class="muted">No categorized errors for this skill.</p>')+
+   '<h4>Recent evidence</h4>'+(d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No attempts yet.</p>');
+ }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+'</div>';}
 }
 
 async function loadReview(){
@@ -305,8 +373,25 @@ async function handleSetAction(button){
 }
 
 async function loadHistory(){
- const d=await get("/api/history");
- $("historyList").innerHTML=d.attempts.length?d.attempts.map(a=>'<div class="history-row"><div><b>'+(a.correct?"✓":"△")+' '+esc(a.answer)+'</b><small>'+esc(a.session_date||a.created_at)+' • '+esc(a.skill_id||a.grammar_focus||"legacy")+'</small></div><span>'+esc(a.feedback||"")+'</span></div>').join(""):'<p class="muted">No practice history yet.</p>';
+ const skill=$("historySkill").value;
+ const error=$("historyError").value;
+ const result=$("historyResult").value;
+ const days=$("historyDays").value;
+ const qs=new URLSearchParams({days,result});
+ if(skill) qs.set("skill",skill);
+ if(error) qs.set("error",error);
+ const d=await get("/api/history?"+qs.toString());
+
+ const oldSkill=skill,oldError=error;
+ $("historySkill").innerHTML='<option value="">All skills</option>'+d.options.skills.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+'</option>').join("");
+ $("historyError").innerHTML='<option value="">All errors</option>'+d.options.errors.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+'</option>').join("");
+ if(d.options.skills.includes(oldSkill)) $("historySkill").value=oldSkill;
+ if(d.options.errors.includes(oldError)) $("historyError").value=oldError;
+ $("historyResult").value=result;
+ $("historyDays").value=days;
+
+ $("historyCount").textContent=d.attempts.length+" checks shown";
+ $("historyList").innerHTML=d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No practice history matches these filters.</p>';
 }
 
 async function loadSettings(){
@@ -328,6 +413,21 @@ async function saveSettings(){
   status.className="result bad";status.textContent=e.message;
  }finally{$("saveSettings").disabled=false;}
 }
+
+$("errorList").onclick=e=>{const b=e.target.closest("[data-error-tag]");if(b)showErrorDetail(b.dataset.errorTag);};
+$("skillList").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
+$("stageProgress").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
+$("errorDetail").onclick=e=>{
+ const toggle=e.target.closest("[data-history-toggle]");if(toggle){const d=$("attempt-detail-"+toggle.dataset.historyToggle);if(d)d.classList.toggle("hidden");}
+ if(e.target.closest('[data-close-drill="error"]')) $("errorDetail").className="drilldown hidden";
+};
+$("skillDetail").onclick=e=>{
+ const toggle=e.target.closest("[data-history-toggle]");if(toggle){const d=$("attempt-detail-"+toggle.dataset.historyToggle);if(d)d.classList.toggle("hidden");}
+ const practice=e.target.closest("[data-skill-practice]");if(practice)startSkill(practice.dataset.skillPractice);
+ if(e.target.closest('[data-close-drill="skill"]')) $("skillDetail").className="drilldown hidden";
+};
+$("historyList").onclick=e=>{const b=e.target.closest("[data-history-toggle]");if(b){const d=$("attempt-detail-"+b.dataset.historyToggle);if(d)d.classList.toggle("hidden");}};
+["historyDays","historySkill","historyError","historyResult"].forEach(id=>$(id).addEventListener("change",()=>loadHistory().catch(e=>alert(e.message))));
 
 document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{
  activateView(b.dataset.view);
