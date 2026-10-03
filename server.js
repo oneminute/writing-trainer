@@ -103,6 +103,11 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_attempts_date ON attempts(session_date, 
 const today = () => new Date().toLocaleDateString("en-CA");
 const addDays = n => { const d=new Date(); d.setDate(d.getDate()+n); return d.toLocaleDateString("en-CA"); };
 const setState=db.prepare("INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+const getState=db.prepare("SELECT value FROM app_state WHERE key=?");
+function getPracticeCount(){
+ const n=Number(getState.get("practiceCount")?.value||12);
+ return Number.isInteger(n)&&n>=4&&n<=20?n:12;
+}
 
 app.use(express.json({limit:"32kb"}));
 app.use(express.static(path.join(__dirname,"public")));
@@ -216,7 +221,7 @@ async function generateExercises(skills,count,mode){
 
  async function callOpenAI(input){
   if(!client) throw new Error("OpenAI fallback unavailable");
-  const r=await client.responses.create({model:openaiModel,reasoning:{effort:"none"},max_output_tokens:1800,instructions,input,text:{format:{type:"json_schema",name:"exercise_set",strict:true,schema:format}}});
+  const r=await client.responses.create({model:openaiModel,reasoning:{effort:"none"},max_output_tokens:Math.min(5000,Math.max(1800,count*220)),instructions,input,text:{format:{type:"json_schema",name:"exercise_set",strict:true,schema:format}}});
   return JSON.parse(r.output_text).exercises;
  }
 
@@ -246,14 +251,27 @@ async function generateExercises(skills,count,mode){
  throw new Error("The local model could not produce a valid Chinese exercise set after 3 attempts: "+lastError);
 }
 
+app.get("/api/settings",(req,res)=>{
+ res.json({practiceCount:getPracticeCount(),minPracticeCount:4,maxPracticeCount:20});
+});
+
+app.post("/api/settings",(req,res)=>{
+ const practiceCount=Number(req.body?.practiceCount);
+ if(!Number.isInteger(practiceCount)||practiceCount<4||practiceCount>20){
+  return res.status(400).json({error:"practiceCount must be an integer from 4 to 20"});
+ }
+ setState.run("practiceCount",String(practiceCount));
+ res.json({ok:true,practiceCount});
+});
+
 app.get("/api/plan",(req,res)=>{const mastery=masteryRows();res.json({currentStage:currentStage(mastery),skills:mastery});});
 
 app.post("/api/generate",async(req,res)=>{
  try{
   const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), force=Boolean(req.body?.force);
-  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=12,setKey="";
-  if(mode==="skill"){if(!skillMap[requestedSkill])return res.status(400).json({error:"Unknown skill"});skills=[requestedSkill];count=6;setKey="skill:"+requestedSkill+":"+date;}
-  else if(mode==="review"){skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id);if(!skills.length)return res.status(400).json({error:"No reviews are due today"});count=Math.min(8,skills.length*2);setKey="review:"+date;}
+  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=getPracticeCount(),setKey="";
+  if(mode==="skill"){if(!skillMap[requestedSkill])return res.status(400).json({error:"Unknown skill"});skills=[requestedSkill];setKey="skill:"+requestedSkill+":"+date;}
+  else if(mode==="review"){skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id);if(!skills.length)return res.status(400).json({error:"No reviews are due today"});setKey="review:"+date;}
   else{skills=todaySkillIds(mastery,stage,date);setKey="today:"+date;}
   if(!force){const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get(setKey);if(cached){const parsed=JSON.parse(cached.exercises_json);const problem=validateGeneratedExercises(parsed,skills,count,mode);if(!problem)return res.json({cached:true,mode,exercises:parsed});db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);console.warn("Discarded invalid cached set:",setKey,problem);}}
   const exercises=await generateExercises(skills,count,mode);
@@ -267,14 +285,15 @@ app.get("/api/today",(req,res)=>{
  db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
  const mastery=masteryRows();
  const stage=currentStage(mastery);
+ const practiceCount=getPracticeCount();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
  const allowed=todaySkillIds(mastery,stage,date);
  let generated=false;
- let exercises=BASE_EXERCISES;
+ let exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
  const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get("today:"+date);
  if(cached){
   const parsed=JSON.parse(cached.exercises_json);
-  const problem=validateGeneratedExercises(parsed,allowed,12,"today");
+  const problem=validateGeneratedExercises(parsed,allowed,practiceCount,"today");
   if(!problem){
    exercises=parsed;
    generated=true;
@@ -283,7 +302,7 @@ app.get("/api/today",(req,res)=>{
    console.warn("Discarded invalid today cache:",problem);
   }
  }
- res.json({date,stage,exercises,dueReviews:due,mastery,generated});
+ res.json({date,stage,practiceCount,exercises,dueReviews:due,mastery,generated});
 });
 
 app.get("/api/progress",(req,res)=>{
