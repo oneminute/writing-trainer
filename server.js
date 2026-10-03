@@ -348,6 +348,42 @@ function promptLanguageProblem(prompt,lesson){
  return "";
 }
 
+function resolveExerciseLesson(exercise,maxStage=12){
+ if(exercise?.lessonId){
+  const exact=curriculumLesson(exercise.lessonId);
+  if(exact) return exact;
+ }
+ const skillId=String(exercise?.skill||"");
+ if(!skillId) return null;
+ let lesson=db.prepare("SELECT * FROM curriculum_lessons WHERE skill_id=? AND enabled=1 AND stage<=? ORDER BY stage,order_in_stage,id LIMIT 1").get(skillId,maxStage);
+ if(!lesson) lesson=db.prepare("SELECT * FROM curriculum_lessons WHERE skill_id=? AND enabled=1 ORDER BY stage,order_in_stage,id LIMIT 1").get(skillId);
+ return lesson?{...lesson,rules:parseJsonArray(lesson.rules_json),commonErrors:parseJsonArray(lesson.common_errors_json),promptPatterns:parseJsonArray(lesson.prompt_patterns_json),requiredElements:parseJsonArray(lesson.required_elements_json),avoid:parseJsonArray(lesson.avoid_json)}:null;
+}
+
+function decorateExercisePlan(exercise,maxStage=12){
+ const lesson=resolveExerciseLesson(exercise,maxStage);
+ const stage=lesson?curriculumStage(lesson.stage):null;
+ const skillId=String(exercise?.skill||lesson?.skill_id||"");
+ return {
+  ...exercise,
+  lessonId:exercise?.lessonId||lesson?.id||"",
+  planMeta:{
+   stage:lesson?.stage||skillMap[skillId]?.stage||null,
+   stageTitle:stage?.title||"",
+   lessonId:exercise?.lessonId||lesson?.id||"",
+   lessonTitle:lesson?.title||"",
+   skillId,
+   skillName:skillMap[skillId]?.name||skillId,
+   objective:lesson?.objective||"",
+   difficulty:lesson?.difficulty||""
+  }
+ };
+}
+
+function decorateExerciseList(exercises,maxStage=12){
+ return exercises.map(q=>decorateExercisePlan(q,maxStage));
+}
+
 function chooseLessonSequence(skillSequence,maxStage,forcedLessonId=null){
  const mastery=new Map(lessonMasteryRows().map(x=>[x.id,x]));
  if(forcedLessonId){
@@ -763,7 +799,7 @@ app.post("/api/generate",async(req,res)=>{
     const parsed=JSON.parse(cached.exercises_json);
     const cacheAllowed=mode==="skill"?[requestedSkill]:SKILLS.map(x=>x.id);
     const problem=validateGeneratedExercises(parsed,cacheAllowed,count,mode);
-    if(!problem) return res.json({cached:true,mode,groupId:cached.group_id||null,exercises:parsed});
+    if(!problem) return res.json({cached:true,mode,groupId:cached.group_id||null,exercises:decorateExerciseList(parsed,stage)});
     db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);
     console.warn("Discarded invalid cached set:",setKey,problem);
    }
@@ -772,7 +808,7 @@ app.post("/api/generate",async(req,res)=>{
   const forcedLesson=requestedLesson?curriculumLesson(requestedLesson):null;
   const groupId=archivePracticeGroup(mode,requestedSkill||null,exercises,{title:forcedLesson?(forcedLesson.title+" Practice · "+date+" · "+exercises.length+" questions"):null});
   db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json,group_id) VALUES(?,?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,skill_id=excluded.skill_id,group_id=excluded.group_id,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises),groupId);
-  res.json({cached:false,mode,groupId,exercises});
+  res.json({cached:false,mode,groupId,exercises:decorateExerciseList(exercises,stage)});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
 });
 
@@ -794,7 +830,7 @@ app.get("/api/today",(req,res)=>{
   if(!problem){exercises=parsed;generated=true;groupId=cached.group_id||null;}
   else{db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);console.warn("Discarded invalid today cache:",problem);}
  }
- res.json({date,stage,practiceCount,groupId,exercises,dueReviews:due,mastery,generated});
+ res.json({date,stage,practiceCount,groupId,exercises:decorateExerciseList(exercises,stage),dueReviews:due,mastery,generated});
 });
 
 function periodMetrics(days){
@@ -926,7 +962,7 @@ app.get("/api/practice-groups/:id",(req,res)=>{
  const group=db.prepare("SELECT id,mode,skill_id,title,exercise_count,favorite,created_at FROM practice_groups WHERE id=?").get(id);
  if(!group) return res.status(404).json({error:"Practice group not found"});
  const items=db.prepare("SELECT exercise_json FROM practice_group_items WHERE group_id=? ORDER BY position").all(id);
- res.json({group:{...group,skillName:group.skill_id?(skillMap[group.skill_id]?.name||group.skill_id):null},exercises:items.map(x=>JSON.parse(x.exercise_json))});
+ res.json({group:{...group,skillName:group.skill_id?(skillMap[group.skill_id]?.name||group.skill_id):null},exercises:decorateExerciseList(items.map(x=>JSON.parse(x.exercise_json)),currentStage())});
 });
 
 app.patch("/api/practice-groups/:id",(req,res)=>{
@@ -966,7 +1002,7 @@ function sessionPayload(id){
  const session=db.prepare("SELECT * FROM practice_sessions WHERE id=?").get(id);
  if(!session) return null;
  const items=db.prepare("SELECT position,exercise_json,answer,correct,completed,attempt_count,hint_level,model_viewed,first_try_correct,independent_correct,last_feedback_json FROM practice_session_items WHERE session_id=? ORDER BY position").all(id)
-  .map(r=>({...r,exercise:JSON.parse(r.exercise_json),feedback:r.last_feedback_json?JSON.parse(r.last_feedback_json):null}));
+  .map(r=>({...r,exercise:decorateExercisePlan(JSON.parse(r.exercise_json),currentStage()),feedback:r.last_feedback_json?JSON.parse(r.last_feedback_json):null}));
  return {session,items};
 }
 
@@ -1063,9 +1099,7 @@ app.post("/api/check",async(req,res)=>{
   if(exerciseId===undefined||!prompt||!answer||!skillId) return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
   const skill=skillMap[skillId];
   let resolvedLesson=lessonId?curriculumLesson(lessonId):null;
-  if(!resolvedLesson){
-   try{resolvedLesson=chooseLessonSequence([skillId],Math.max(currentStage(),skill?.stage||1))[0]||null;}catch{}
-  }
+  if(!resolvedLesson) resolvedLesson=resolveExerciseLesson({skill:skillId},Math.max(currentStage(),skill?.stage||1));
   const resolvedLessonId=resolvedLesson?.id||null;
   const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
   const previousAttempts=sessionItem?.attempt_count||0;
