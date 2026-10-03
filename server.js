@@ -266,9 +266,24 @@ app.get("/api/today",(req,res)=>{
  const date=today();
  db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
  const mastery=masteryRows();
+ const stage=currentStage(mastery);
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
+ const allowed=todaySkillIds(mastery,stage,date);
+ let generated=false;
+ let exercises=BASE_EXERCISES;
  const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get("today:"+date);
- res.json({date,stage:currentStage(mastery),exercises:cached?JSON.parse(cached.exercises_json):BASE_EXERCISES,dueReviews:due,mastery,generated:Boolean(cached)});
+ if(cached){
+  const parsed=JSON.parse(cached.exercises_json);
+  const problem=validateGeneratedExercises(parsed,allowed,12,"today");
+  if(!problem){
+   exercises=parsed;
+   generated=true;
+  }else{
+   db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);
+   console.warn("Discarded invalid today cache:",problem);
+  }
+ }
+ res.json({date,stage,exercises,dueReviews:due,mastery,generated});
 });
 
 app.get("/api/progress",(req,res)=>{
