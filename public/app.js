@@ -257,7 +257,7 @@ function attemptCard(a){
  return '<div class="attempt-card" data-attempt-id="'+a.id+'">'+
   '<div class="attempt-summary"><div><b>'+(a.correct?"✓ ":"△ ")+esc(a.answer||"")+'</b><small>'+esc(a.session_date||a.created_at||"")+' • '+esc(a.skill_id||"legacy")+(a.error_tag&&a.error_tag!=="none"?' • '+esc(a.error_tag):'')+'</small></div>'+
   '<button data-history-toggle="'+a.id+'">Details</button></div>'+
-  '<div class="attempt-detail hidden" id="attempt-detail-'+a.id+'">'+
+  '<div class="attempt-detail hidden">'+
    '<p><b>Prompt:</b> '+esc(a.prompt||"")+'</p>'+
    '<p><b>Feedback:</b> '+esc(a.feedback||"")+'</p>'+
    '<p><b>Suggestion:</b> '+esc(a.suggestion||"")+'</p>'+
@@ -282,7 +282,7 @@ async function loadProgress(){
  $("stageProgress").innerHTML=
   '<div class="stage-progress-head"><div><b>Stage '+p.stage+'</b><div class="muted">'+p.stable+' / '+p.total+' skills at 75%+</div></div><strong>'+p.percent+'%</strong></div>'+
   '<div class="stage-meter"><i style="width:'+p.percent+'%"></i></div>'+
-  (p.blockers?.length?'<h3>Skills still blocking the next stage</h3><div class="blocker-list">'+p.blockers.map(x=>'<button class="blocker" data-skill-detail="'+x.id+'">'+esc(x.name)+' · '+x.score+'%</button>').join("")+'</div>':'<p class="result ok">Stage requirements are currently satisfied.</p>');
+  (p.blockers?.length?'<h3>Skills still blocking the next stage</h3><div class="blocker-list">'+p.blockers.map(x=>'<button class="blocker" data-skill-detail="'+x.id+'">'+esc(x.name)+' · '+x.score+'% · '+x.attempts+'/2 evidence</button>').join("")+'</div>':'<p class="result ok">Stage requirements are currently satisfied.</p>');
 
  if(d.trend?.length){
   const max=Math.max(...d.trend.map(x=>Number(x.checks||0)),1);
@@ -291,6 +291,12 @@ async function loadProgress(){
    return '<div class="trend-row"><span>'+esc(x.date)+'</span><div class="trend-track"><i style="width:'+width+'%"></i></div><small>'+x.checks+' checks • '+x.correct+' correct • '+x.independent_correct+' independent • '+x.errors+' errors</small></div>';
   }).join("");
  }else $("trendList").innerHTML='<p class="muted">No recent practice data yet.</p>';
+
+ $("recentSessionsList").innerHTML=d.recentSessions?.length?d.recentSessions.map(s=>{
+  const score=s.total_items?Math.round(Number(s.correct_count||0)/Number(s.total_items)*100):0;
+  const first=s.total_items?Math.round(Number(s.first_try_correct||0)/Number(s.total_items)*100):0;
+  return '<div class="session-row"><div><b>'+esc(s.title)+'</b><small>'+esc(s.mode)+' • '+esc((s.started_at||"").replace("T"," ").slice(0,16))+' • '+esc(s.status)+'</small></div><span>'+score+'% final • '+first+'% first try</span></div>';
+ }).join(""):'<p class="muted">No saved sessions yet.</p>';
 
  $("errorList").innerHTML=d.errors?.length?d.errors.map(x=>'<button class="error-chip" data-error-tag="'+esc(x.error)+'"><b>'+esc(x.error.replaceAll("_"," "))+'</b><span>'+x.count+'</span></button>').join(""):'<p class="muted">No recurring errors recorded in the last 30 days.</p>';
  $("errorDetail").className="drilldown hidden";
@@ -417,16 +423,24 @@ async function saveSettings(){
 $("errorList").onclick=e=>{const b=e.target.closest("[data-error-tag]");if(b)showErrorDetail(b.dataset.errorTag);};
 $("skillList").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
 $("stageProgress").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
+function toggleAttemptDetail(target){
+ const button=target.closest("[data-history-toggle]");
+ if(!button) return false;
+ const card=button.closest(".attempt-card");
+ const detail=card?.querySelector(".attempt-detail");
+ if(detail) detail.classList.toggle("hidden");
+ return true;
+}
 $("errorDetail").onclick=e=>{
- const toggle=e.target.closest("[data-history-toggle]");if(toggle){const d=$("attempt-detail-"+toggle.dataset.historyToggle);if(d)d.classList.toggle("hidden");}
+ toggleAttemptDetail(e.target);
  if(e.target.closest('[data-close-drill="error"]')) $("errorDetail").className="drilldown hidden";
 };
 $("skillDetail").onclick=e=>{
- const toggle=e.target.closest("[data-history-toggle]");if(toggle){const d=$("attempt-detail-"+toggle.dataset.historyToggle);if(d)d.classList.toggle("hidden");}
+ toggleAttemptDetail(e.target);
  const practice=e.target.closest("[data-skill-practice]");if(practice)startSkill(practice.dataset.skillPractice);
  if(e.target.closest('[data-close-drill="skill"]')) $("skillDetail").className="drilldown hidden";
 };
-$("historyList").onclick=e=>{const b=e.target.closest("[data-history-toggle]");if(b){const d=$("attempt-detail-"+b.dataset.historyToggle);if(d)d.classList.toggle("hidden");}};
+$("historyList").onclick=e=>{toggleAttemptDetail(e.target);};
 ["historyDays","historySkill","historyError","historyResult"].forEach(id=>$(id).addEventListener("change",()=>loadHistory().catch(e=>alert(e.message))));
 
 document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{
