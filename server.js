@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS daily_sessions (
 `);
 
 const cols = db.prepare("PRAGMA table_info(attempts)").all().map(x=>x.name);
-for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"]]) {
+for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"],["error_tag","TEXT"]]) {
   if (!cols.includes(name)) db.exec(`ALTER TABLE attempts ADD COLUMN ${name} ${type}`);
 }
 db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
@@ -194,6 +194,29 @@ const schema={type:"object",additionalProperties:false,properties:{
  feedback:{type:"string"},suggestion:{type:"string"},betterSentence:{type:"string"},
  skillSuccess:{type:"boolean"},errorTag:{type:"string"}
 },required:["correct","meaning","grammar","tense","capitalization","punctuation","feedback","suggestion","betterSentence","skillSuccess","errorTag"]};
+
+const ERROR_TAGS=[
+ "none","subject_verb_agreement","verb_tense","auxiliary_base_form","article","preposition",
+ "pronoun","singular_plural","word_order","clause_structure","capitalization","punctuation",
+ "vocabulary","meaning","assisted_success","other"
+];
+
+function normalizeErrorTag(tag,result){
+ if(result?.skillSuccess&&String(tag||"").toLowerCase()==="none") return "none";
+ const raw=String(tag||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+ const map={
+  tense:"verb_tense",past_tense:"verb_tense",present_tense:"verb_tense",future_tense:"verb_tense",
+  subject_verb:"subject_verb_agreement",subject_verb_agreement:"subject_verb_agreement",agreement:"subject_verb_agreement",
+  did_base_form:"auxiliary_base_form",auxiliary:"auxiliary_base_form",auxiliary_base_form:"auxiliary_base_form",
+  articles:"article",article:"article",prepositions:"preposition",preposition:"preposition",
+  pronouns:"pronoun",pronoun_case:"pronoun",pronoun:"pronoun",
+  plural:"singular_plural",singular_plural:"singular_plural",
+  word_order:"word_order",clause:"clause_structure",clause_structure:"clause_structure",
+  capitalization:"capitalization",punctuation:"punctuation",vocabulary:"vocabulary",
+  meaning:"meaning",semantic:"meaning",none:"none"
+ };
+ return map[raw] ? map[raw] : (ERROR_TAGS.includes(raw) ? raw : "other");
+}
 
 function masteryRows(){
  return SKILLS.map(s=>{
@@ -506,6 +529,7 @@ app.patch("/api/practice-groups/:id",(req,res)=>{
 
 app.delete("/api/practice-groups/:id",(req,res)=>{
  const id=Number(req.params.id);
+ db.prepare("DELETE FROM generated_sets WHERE group_id=?").run(id);
  const info=db.prepare("DELETE FROM practice_groups WHERE id=?").run(id);
  if(!info.changes) return res.status(404).json({error:"Practice group not found"});
  res.json({ok:true});
@@ -573,7 +597,7 @@ app.patch("/api/sessions/:id/items/:position",(req,res)=>{
 });
 
 app.get("/api/history",(req,res)=>{
- const rows=db.prepare("SELECT id,session_date,exercise_id,exercise_type,skill_id,prompt,answer,correct,feedback,suggestion,better_sentence,created_at FROM attempts ORDER BY id DESC LIMIT 200").all();
+ const rows=db.prepare("SELECT id,session_date,exercise_id,exercise_type,skill_id,prompt,answer,correct,error_tag,feedback,suggestion,better_sentence,created_at FROM attempts ORDER BY id DESC LIMIT 200").all();
  res.json({attempts:rows});
 });
 
@@ -608,6 +632,7 @@ app.post("/api/check",async(req,res)=>{
   const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly.";
   const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
   const r=await runWritingCheck(input,instructions);
+  r.errorTag=normalizeErrorTag(r.errorTag,r);
   let evidence=0;
   if(r.skillSuccess){
    if(modelViewed) evidence=.25;
@@ -616,7 +641,7 @@ app.post("/api/check",async(req,res)=>{
    else if(firstTry) evidence=1;
    else evidence=.8;
   }
-  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today());
+  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag);
   const aid=Number(info.lastInsertRowid);
   db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
 
@@ -635,7 +660,7 @@ app.post("/api/check",async(req,res)=>{
   if(r.skillSuccess&&evidence>=.65){
    if(q){const streak=q.streak+1;if(streak>=4) db.prepare("DELETE FROM review_queue WHERE skill_id=?").run(skillId);else db.prepare("UPDATE review_queue SET due_date=?,streak=?,updated_at=CURRENT_TIMESTAMP WHERE skill_id=?").run(addDays(nextReviewDays(streak)),streak,skillId);}
   }else if(!r.skillSuccess||evidence<.65){
-   db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),r.errorTag||"assisted_success");
+   db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),(r.errorTag&&r.errorTag!=="none")?r.errorTag:"assisted_success");
   }
   res.json({...r,attemptId:aid,evidenceScore:evidence,firstTry});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"LLM request failed"});}
