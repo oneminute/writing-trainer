@@ -332,9 +332,9 @@ async function loadProgress(){
   '<div class="dash-card"><span>Model answers · 30 days</span><b>'+d.last30.modelViewed+'</b><small>questions opened</small></div>';
 
  $("stageProgress").innerHTML=
-  '<div class="stage-progress-head"><div><b>Stage '+p.stage+'</b><div class="muted">'+p.stable+' / '+p.total+' skills at 75%+</div></div><strong>'+p.percent+'%</strong></div>'+
+  '<div class="stage-progress-head"><div><b>Stage '+p.stage+'</b><div class="muted">'+p.stable+' / '+p.total+' lessons stable+</div></div><strong>'+p.percent+'%</strong></div>'+
   '<div class="stage-meter"><i style="width:'+p.percent+'%"></i></div>'+
-  (p.blockers?.length?'<h3>Skills still blocking the next stage</h3><div class="blocker-list">'+p.blockers.map(x=>'<button class="blocker" data-skill-detail="'+x.id+'">'+esc(x.name)+' · '+x.score+'% · '+x.attempts+'/2 evidence</button>').join("")+'</div>':'<p class="result ok">Stage requirements are currently satisfied.</p>');
+  (p.blockers?.length?'<h3>Lessons still blocking the next stage</h3><div class="blocker-list">'+p.blockers.map(x=>'<button class="blocker" data-lesson-detail="'+x.id+'">'+esc(x.name)+' · '+x.score+'% · '+x.attempts+'/2 evidence</button>').join("")+'</div>':'<p class="result ok">Stage requirements are currently satisfied.</p>');
 
  if(d.trend?.length){
   const max=Math.max(...d.trend.map(x=>Number(x.checks||0)),1);
@@ -380,6 +380,27 @@ async function showSkillDetail(id){
   const s=d.skill;
   box.innerHTML='<div class="drill-head"><div><h3>'+esc(s.name)+'</h3><p class="muted">'+esc(s.description)+' • '+esc(s.status)+' • '+s.score+'% mastery • '+s.attempts+' recent evidence records</p></div><div class="actions compact"><button data-skill-practice="'+s.id+'" class="primary">Practice this skill</button><button data-close-drill="skill">Close</button></div></div>'+
    (d.errors?.length?'<p><b>Error patterns:</b> '+d.errors.map(x=>esc(x.error)+" ("+x.count+")").join(", ")+'</p>':'<p class="muted">No categorized errors for this skill.</p>')+
+   '<h4>Recent evidence</h4>'+(d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No attempts yet.</p>');
+ }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+'</div>';}
+}
+
+async function showLessonDetail(id){
+ const box=$("skillDetail");
+ box.className="drilldown";
+ box.innerHTML='<p class="muted">Loading lesson details…</p>';
+ try{
+  const d=await get("/api/lessons/"+encodeURIComponent(id));
+  const l=d.lesson;
+  box.innerHTML='<div class="drill-head"><div><h3>'+esc(l.title)+'</h3><p class="muted">Stage '+l.stage+' • '+esc(l.skill_id)+' • '+esc(l.status)+' • '+l.score+'% mastery • '+l.attempts+' evidence records</p></div><div class="actions compact"><button data-lesson-practice="'+l.id+'" data-lesson-skill="'+l.skill_id+'" class="primary">Practice this lesson</button><button data-close-drill="skill">Close</button></div></div>'+
+   '<p>'+esc(l.objective)+'</p>'+
+   '<div class="lesson-detail-grid">'+
+    '<div><h4>Rules</h4>'+planList(l.rules||[])+'</div>'+
+    '<div><h4>Common errors</h4>'+planList(l.commonErrors||[])+'</div>'+
+    '<div><h4>Prompt patterns</h4>'+planList(l.promptPatterns||[])+'</div>'+
+    '<div><h4>Required elements</h4>'+planList(l.requiredElements||[])+'</div>'+
+    '<div><h4>Avoid</h4>'+planList(l.avoid||[])+'</div>'+
+    '<div><h4>Difficulty</h4><p>'+esc(l.difficulty||"")+'</p></div>'+
+   '</div>'+
    '<h4>Recent evidence</h4>'+(d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No attempts yet.</p>');
  }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+'</div>';}
 }
@@ -487,7 +508,7 @@ async function saveSettings(){
 
 $("errorList").onclick=e=>{const b=e.target.closest("[data-error-tag]");if(b)showErrorDetail(b.dataset.errorTag);};
 $("skillList").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
-$("stageProgress").onclick=e=>{const b=e.target.closest("[data-skill-detail]");if(b)showSkillDetail(b.dataset.skillDetail);};
+$("stageProgress").onclick=e=>{const b=e.target.closest("[data-lesson-detail]");if(b)showLessonDetail(b.dataset.lessonDetail);};
 function toggleAttemptDetail(target){
  const button=target.closest("[data-history-toggle]");
  if(!button) return false;
@@ -504,6 +525,7 @@ $("errorDetail").onclick=e=>{
 $("skillDetail").onclick=e=>{
  toggleAttemptDetail(e.target);
  const practice=e.target.closest("[data-skill-practice]");if(practice)startSkill(practice.dataset.skillPractice);
+ const lessonPractice=e.target.closest("[data-lesson-practice]");if(lessonPractice)startLesson(lessonPractice.dataset.lessonPractice,lessonPractice.dataset.lessonSkill,lessonPractice);
  if(e.target.closest('[data-close-drill="skill"]')) $("skillDetail").className="drilldown hidden";
 };
 $("historyList").onclick=e=>{toggleAttemptDetail(e.target);};
