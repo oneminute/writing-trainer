@@ -232,10 +232,14 @@ function masteryRows(){
  });
 }
 
+function skillReadyForNextStage(skill){
+ return skill.attempts>=2 && skill.score>=75;
+}
+
 function currentStage(mastery){
  for(let stage=1;stage<=12;stage++){
    const relevant=mastery.filter(x=>x.stage===stage);
-   if(relevant.length && relevant.some(x=>x.status!=="Mastered" && x.score<75)) return stage;
+   if(relevant.length && relevant.some(x=>!skillReadyForNextStage(x))) return stage;
  }
  return 12;
 }
@@ -543,8 +547,8 @@ app.get("/api/progress",(req,res)=>{
  const mastery=masteryRows();
  const stage=currentStage(mastery);
  const stageSkills=mastery.filter(x=>x.stage===stage);
- const stableSkills=stageSkills.filter(x=>x.score>=75);
- const blockers=stageSkills.filter(x=>x.score<75).sort((a,b)=>a.score-b.score);
+ const stableSkills=stageSkills.filter(skillReadyForNextStage);
+ const blockers=stageSkills.filter(x=>!skillReadyForNextStage(x)).sort((a,b)=>(a.attempts-b.attempts)||(a.score-b.score));
  const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
  const sessions=db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed FROM practice_sessions").get();
  const errors=db.prepare(`SELECT error_tag error,COUNT(*) count
@@ -566,7 +570,7 @@ app.get("/api/progress",(req,res)=>{
   stageProgress:{
    stage,total:stageSkills.length,stable:stableSkills.length,
    percent:stageSkills.length?Math.round(stableSkills.length/stageSkills.length*100):100,
-   blockers:blockers.map(x=>({id:x.id,name:x.name,score:x.score,status:x.status}))
+   blockers:blockers.map(x=>({id:x.id,name:x.name,score:x.score,status:x.status,attempts:x.attempts,neededAttempts:Math.max(0,2-x.attempts)}))
   }
  });
 });
@@ -702,7 +706,8 @@ app.get("/api/history",(req,res)=>{
  const skill=String(req.query.skill||"").trim();
  const error=String(req.query.error||"").trim();
  const result=String(req.query.result||"all");
- const days=Math.max(0,Math.min(3650,Number(req.query.days)||30));
+ const requestedDays=req.query.days===undefined?30:Number(req.query.days);
+ const days=Math.max(0,Math.min(3650,Number.isFinite(requestedDays)?requestedDays:30));
  const where=["1=1"],params=[];
  if(skill){where.push("a.skill_id=?");params.push(skill);}
  if(error){where.push("a.error_tag=?");params.push(error);}
