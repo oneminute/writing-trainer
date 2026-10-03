@@ -884,7 +884,7 @@ app.post("/api/check",async(req,res)=>{
 app.get("/api/health",async(req,res)=>{
  let ollamaAvailable=false;
  try{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),1500);const r=await fetch(ollamaBaseUrl+"/api/tags",{signal:controller.signal});clearTimeout(timer);ollamaAvailable=r.ok;}catch{}
- res.json({llm_provider:llmProvider,ollama_available:ollamaAvailable,ollama_base_url:ollamaBaseUrl,ollama_writing_model:ollamaModel,openai_enabled:Boolean(client),openai_model:openaiModel});
+ res.json({llm_provider:llmProvider,ollama_available:ollamaAvailable,ollama_base_url:ollamaBaseUrl,ollama_writing_model:ollamaModel,ollama_check_timeout_seconds:Math.round(ollamaTimeoutMs/1000),ollama_generation_timeout_seconds:Math.round(ollamaGenerationTimeoutMs/1000),ollama_generation_batch_size:ollamaGenerationBatchSize,openai_enabled:Boolean(client),openai_model:openaiModel});
 });
 
 app.post("/api/complete-day",(req,res)=>{
