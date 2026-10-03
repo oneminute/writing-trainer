@@ -738,7 +738,8 @@ app.get("/api/history",(req,res)=>{
   ORDER BY a.id DESC LIMIT 300`).all(...params);
  const skills=db.prepare("SELECT DISTINCT skill_id FROM attempts WHERE skill_id IS NOT NULL ORDER BY skill_id").all().map(x=>x.skill_id);
  const errors=db.prepare("SELECT DISTINCT error_tag FROM attempts WHERE error_tag IS NOT NULL AND error_tag!='none' ORDER BY error_tag").all().map(x=>x.error_tag);
- res.json({attempts:rows,filters:{skill,error,result,days},options:{skills,errors}});
+ const modes=db.prepare("SELECT DISTINCT COALESCE(ps.mode,a.exercise_type) mode FROM attempts a LEFT JOIN practice_sessions ps ON ps.id=a.session_id WHERE COALESCE(ps.mode,a.exercise_type) IS NOT NULL ORDER BY mode").all().map(x=>x.mode);
+ res.json({attempts:rows,filters:{skill,error,result,mode,days},options:{skills,errors,modes}});
 });
 
 app.get("/api/review",(req,res)=>{
