@@ -98,6 +98,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
  exercises_json TEXT NOT NULL,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`);
+const generatedSetCols=db.prepare("PRAGMA table_info(generated_sets)").all().map(x=>x.name);
+if(!generatedSetCols.includes("group_id")) db.exec("ALTER TABLE generated_sets ADD COLUMN group_id INTEGER");
+
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS practice_groups (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +127,51 @@ CREATE TABLE IF NOT EXISTS practice_group_items (
 );
 CREATE INDEX IF NOT EXISTS idx_practice_groups_created ON practice_groups(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_practice_items_group ON practice_group_items(group_id, position);
+CREATE TABLE IF NOT EXISTS practice_sessions (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ group_id INTEGER,
+ title TEXT NOT NULL,
+ mode TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'in_progress',
+ current_index INTEGER NOT NULL DEFAULT 0,
+ total_items INTEGER NOT NULL,
+ correct_count INTEGER NOT NULL DEFAULT 0,
+ first_try_correct INTEGER NOT NULL DEFAULT 0,
+ started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ completed_at TEXT,
+ FOREIGN KEY(group_id) REFERENCES practice_groups(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS practice_session_items (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ session_id INTEGER NOT NULL,
+ position INTEGER NOT NULL,
+ exercise_id TEXT,
+ skill_id TEXT,
+ exercise_json TEXT NOT NULL,
+ answer TEXT NOT NULL DEFAULT '',
+ correct INTEGER NOT NULL DEFAULT 0,
+ completed INTEGER NOT NULL DEFAULT 0,
+ attempt_count INTEGER NOT NULL DEFAULT 0,
+ hint_level INTEGER NOT NULL DEFAULT 0,
+ model_viewed INTEGER NOT NULL DEFAULT 0,
+ first_try_correct INTEGER NOT NULL DEFAULT 0,
+ last_feedback_json TEXT,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(session_id) REFERENCES practice_sessions(id) ON DELETE CASCADE,
+ UNIQUE(session_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_practice_sessions_group ON practice_sessions(group_id, status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_session_items_session ON practice_session_items(session_id, position);
 `);
+const groupCols=db.prepare("PRAGMA table_info(practice_groups)").all().map(x=>x.name);
+if(!groupCols.includes("favorite")) db.exec("ALTER TABLE practice_groups ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0");
+
+const skillAttemptCols=db.prepare("PRAGMA table_info(skill_attempts)").all().map(x=>x.name);
+for(const [name,type] of [["evidence_score","REAL"],["first_try","INTEGER"],["hint_level","INTEGER"],["model_viewed","INTEGER"]]){
+ if(!skillAttemptCols.includes(name)) db.exec("ALTER TABLE skill_attempts ADD COLUMN "+name+" "+type);
+}
+
 db.exec("CREATE INDEX IF NOT EXISTS idx_skill_attempts_skill ON skill_attempts(skill_id, created_at)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_attempts_date ON attempts(session_date, id)");
 
@@ -149,11 +197,14 @@ const schema={type:"object",additionalProperties:false,properties:{
 
 function masteryRows(){
  return SKILLS.map(s=>{
-   const rows=db.prepare("SELECT success FROM skill_attempts WHERE skill_id=? ORDER BY id DESC LIMIT 8").all(s.id);
-   if(!rows.length) return {...s,score:0,attempts:0,status:"Not started"};
-   const weights=rows.map((_,i)=>Math.max(1,8-i));
-   const score=Math.round(rows.reduce((a,r,i)=>a+r.success*weights[i],0)/weights.reduce((a,b)=>a+b,0)*100);
-   return {...s,score,attempts:rows.length,status:statusFromMastery(score,rows.length)};
+   const rows=db.prepare("SELECT success,evidence_score,first_try,hint_level,model_viewed FROM skill_attempts WHERE skill_id=? ORDER BY id DESC LIMIT 10").all(s.id);
+   if(!rows.length) return {...s,score:0,attempts:0,status:"Not started",independentCorrect:0,assistedCorrect:0};
+   const weights=rows.map((_,i)=>Math.max(1,10-i));
+   const evidence=rows.map(r=>r.evidence_score==null?(r.success?1:0):Number(r.evidence_score));
+   const score=Math.round(evidence.reduce((a,v,i)=>a+v*weights[i],0)/weights.reduce((a,b)=>a+b,0)*100);
+   const independentCorrect=rows.filter(r=>r.success&&r.first_try===1&&(r.hint_level||0)===0&&(r.model_viewed||0)===0).length;
+   const assistedCorrect=rows.filter(r=>r.success&&!((r.first_try===1)&&(r.hint_level||0)===0&&(r.model_viewed||0)===0)).length;
+   return {...s,score,attempts:rows.length,status:statusFromMastery(score,rows.length),independentCorrect,assistedCorrect};
  });
 }
 
@@ -216,7 +267,34 @@ function todaySkillIds(mastery,stage,date){
  return skills.length?skills:SKILLS.filter(x=>x.stage<=Math.max(2,stage)).slice(0,6).map(x=>x.id);
 }
 
-async function generateExercises(skills,count,mode){
+function cyclePick(items,count,fallback=[]){
+ const source=items.length?items:fallback;
+ if(!source.length) return [];
+ return Array.from({length:count},(_,i)=>source[i%source.length]);
+}
+
+function buildTodaySkillSequence(mastery,stage,date,count){
+ const due=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id).filter(x=>skillMap[x]);
+ const weak=mastery.filter(x=>x.attempts&&x.score<70).sort((a,b)=>a.score-b.score).map(x=>x.id);
+ const current=SKILLS.filter(x=>x.stage===stage).map(x=>x.id);
+ const learned=mastery.filter(x=>x.attempts>0&&x.status!=="Not started").map(x=>x.id);
+ const reviewN=Math.min(count,Math.max(1,Math.round(count*0.17)));
+ const weakN=Math.min(count-reviewN,Math.max(1,Math.round(count*0.17)));
+ const currentN=Math.min(count-reviewN-weakN,Math.max(1,Math.round(count*0.34)));
+ const mixedN=Math.max(0,count-reviewN-weakN-currentN);
+ return [
+  ...cyclePick(due,reviewN,current),
+  ...cyclePick(weak,weakN,current),
+  ...cyclePick(current,currentN,learned),
+  ...cyclePick([...new Set([...learned,...current])],mixedN,current)
+ ].slice(0,count);
+}
+
+function buildSkillSequence(skills,count){
+ return cyclePick([...new Set(skills.filter(x=>skillMap[x]))],count,SKILLS.slice(0,1).map(x=>x.id));
+}
+
+async function generateExercises(skills,count,mode,targetSequence=null){
  const allowed=[...new Set(skills.filter(x=>skillMap[x]))].slice(0,8);
  if(!allowed.length) throw new Error("No valid curriculum skills were selected");
  const format=exerciseSchemaFor(allowed,count,mode);
@@ -231,7 +309,8 @@ async function generateExercises(skills,count,mode){
   "Do not duplicate prompts.",
   "Return only valid JSON matching the schema."
  ].join(" ");
- const baseInput="Mode: "+mode+". Generate exactly "+count+" exercises. Allowed primary skill IDs: "+allowed.join(", ")+". Skill descriptions: "+allowed.map(id=>id+": "+skillMap[id].description).join("; ")+".";
+ const sequence=Array.isArray(targetSequence)&&targetSequence.length===count?targetSequence:null;
+ const baseInput="Mode: "+mode+". Generate exactly "+count+" exercises. Allowed primary skill IDs: "+allowed.join(", ")+". Skill descriptions: "+allowed.map(id=>id+": "+skillMap[id].description).join("; ")+(sequence?" IMPORTANT: exercise primary skills in exact order must be: "+sequence.join(", ")+".":"");
 
  async function callOllama(input){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ollamaTimeoutMs);
@@ -266,7 +345,8 @@ async function generateExercises(skills,count,mode){
      exercises=await callOpenAI(baseInput+retryNote);
     }
    }
-   const problem=validateGeneratedExercises(exercises,allowed,count,mode);
+   let problem=validateGeneratedExercises(exercises,allowed,count,mode);
+   if(!problem&&sequence){for(let i=0;i<count;i++){if(exercises[i]?.skill!==sequence[i]){problem="exercise "+(i+1)+" must use skill "+sequence[i]+", got "+exercises[i]?.skill;break;}}}
    if(!problem) return exercises;
    lastError=problem;
    console.warn("Rejected generated exercise set:",problem);
@@ -298,18 +378,22 @@ function archivePracticeGroup(mode,skillId,exercises,{archiveKey=null,title=null
 }
 
 function importExistingGeneratedSets(){
- const rows=db.prepare("SELECT set_key,mode,skill_id,exercises_json,created_at FROM generated_sets ORDER BY created_at").all();
+ const rows=db.prepare("SELECT set_key,mode,skill_id,exercises_json,created_at,group_id FROM generated_sets ORDER BY created_at").all();
  const exists=db.prepare("SELECT id FROM practice_groups WHERE archive_key=?");
  for(const row of rows){
   const archiveKey="generated_sets:"+row.set_key;
-  if(exists.get(archiveKey)) continue;
+  let groupId=row.group_id||exists.get(archiveKey)?.id;
   try{
    const exercises=JSON.parse(row.exercises_json);
    if(!Array.isArray(exercises)||!exercises.length) continue;
-   archivePracticeGroup(row.mode,row.skill_id,exercises,{archiveKey,title:practiceGroupTitle(row.mode,row.skill_id,exercises.length,row.created_at?.slice(0,10)||today())});
+   if(!groupId) groupId=archivePracticeGroup(row.mode,row.skill_id,exercises,{archiveKey,title:practiceGroupTitle(row.mode,row.skill_id,exercises.length,row.created_at?.slice(0,10)||today())});
+   db.prepare("UPDATE generated_sets SET group_id=? WHERE set_key=?").run(groupId,row.set_key);
   }catch(e){console.warn("Could not import cached practice set",row.set_key,e.message);}
  }
+ const baseKey="base:starter";
+ if(!exists.get(baseKey)) archivePracticeGroup("today",null,BASE_EXERCISES,{archiveKey:baseKey,title:"Starter Practice · "+BASE_EXERCISES.length+" questions"});
 }
+
 importExistingGeneratedSets();
 
 app.get("/api/settings",(req,res)=>{
@@ -330,14 +414,32 @@ app.get("/api/plan",(req,res)=>{const mastery=masteryRows();res.json({currentSta
 app.post("/api/generate",async(req,res)=>{
  try{
   const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), force=Boolean(req.body?.force);
-  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=getPracticeCount(),setKey="";
-  if(mode==="skill"){if(!skillMap[requestedSkill])return res.status(400).json({error:"Unknown skill"});skills=[requestedSkill];setKey="skill:"+requestedSkill+":"+date;}
-  else if(mode==="review"){skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id);if(!skills.length)return res.status(400).json({error:"No reviews are due today"});setKey="review:"+date;}
-  else{skills=todaySkillIds(mastery,stage,date);setKey="today:"+date;}
-  if(!force){const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get(setKey);if(cached){const parsed=JSON.parse(cached.exercises_json);const problem=validateGeneratedExercises(parsed,skills,count,mode);if(!problem)return res.json({cached:true,mode,exercises:parsed});db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);console.warn("Discarded invalid cached set:",setKey,problem);}}
-  const exercises=await generateExercises(skills,count,mode);
-  db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json) VALUES(?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises));
+  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=getPracticeCount(),setKey="",sequence=[];
+  if(mode==="skill"){
+   if(!skillMap[requestedSkill]) return res.status(400).json({error:"Unknown skill"});
+   skills=[requestedSkill];sequence=buildSkillSequence(skills,count);setKey="skill:"+requestedSkill+":"+date;
+  }else if(mode==="review"){
+   skills=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id).filter(x=>skillMap[x]);
+   if(!skills.length) return res.status(400).json({error:"No reviews are due today"});
+   sequence=buildSkillSequence(skills,count);setKey="review:"+date;
+  }else{
+   sequence=buildTodaySkillSequence(mastery,stage,date,count);
+   skills=[...new Set(sequence)];setKey="today:"+date;
+  }
+  if(!force){
+   const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get(setKey);
+   if(cached){
+    const parsed=JSON.parse(cached.exercises_json);
+    let problem=validateGeneratedExercises(parsed,skills,count,mode);
+    if(!problem&&sequence.length===count){for(let i=0;i<count;i++){if(parsed[i]?.skill!==sequence[i]){problem="planner sequence changed";break;}}}
+    if(!problem) return res.json({cached:true,mode,groupId:cached.group_id||null,exercises:parsed});
+    db.prepare("DELETE FROM generated_sets WHERE set_key=?").run(setKey);
+    console.warn("Discarded invalid cached set:",setKey,problem);
+   }
+  }
+  const exercises=await generateExercises(skills,count,mode,sequence);
   const groupId=archivePracticeGroup(mode,requestedSkill||null,exercises);
+  db.prepare("INSERT INTO generated_sets(set_key,mode,skill_id,exercises_json,group_id) VALUES(?,?,?,?,?) ON CONFLICT(set_key) DO UPDATE SET exercises_json=excluded.exercises_json,skill_id=excluded.skill_id,group_id=excluded.group_id,created_at=CURRENT_TIMESTAMP").run(setKey,mode,requestedSkill||null,JSON.stringify(exercises),groupId);
   res.json({cached:false,mode,groupId,exercises});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
 });
@@ -349,42 +451,125 @@ app.get("/api/today",(req,res)=>{
  const stage=currentStage(mastery);
  const practiceCount=getPracticeCount();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
- const allowed=todaySkillIds(mastery,stage,date);
- let generated=false;
+ const sequence=buildTodaySkillSequence(mastery,stage,date,practiceCount);
+ const allowed=[...new Set(sequence)];
+ let generated=false,groupId=null;
  let exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
- const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get("today:"+date);
+ const baseGroup=db.prepare("SELECT id FROM practice_groups WHERE archive_key='base:starter'").get();
+ groupId=baseGroup?.id||null;
+ const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get("today:"+date);
  if(cached){
   const parsed=JSON.parse(cached.exercises_json);
-  const problem=validateGeneratedExercises(parsed,allowed,practiceCount,"today");
-  if(!problem){
-   exercises=parsed;
-   generated=true;
-  }else{
-   db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);
-   console.warn("Discarded invalid today cache:",problem);
-  }
+  let problem=validateGeneratedExercises(parsed,allowed,practiceCount,"today");
+  if(!problem){for(let i=0;i<practiceCount;i++){if(parsed[i]?.skill!==sequence[i]){problem="planner sequence changed";break;}}}
+  if(!problem){exercises=parsed;generated=true;groupId=cached.group_id||null;}
+  else{db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);console.warn("Discarded invalid today cache:",problem);}
  }
- res.json({date,stage,practiceCount,exercises,dueReviews:due,mastery,generated});
+ res.json({date,stage,practiceCount,groupId,exercises,dueReviews:due,mastery,generated});
 });
 
 app.get("/api/progress",(req,res)=>{
  const mastery=masteryRows();
  const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
- res.json({mastery,stage:currentStage(mastery),totals});
+ const sessions=db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed FROM practice_sessions").get();
+ const errors=db.prepare("SELECT last_error error,COUNT(*) count FROM review_queue WHERE last_error IS NOT NULL GROUP BY last_error ORDER BY count DESC LIMIT 8").all();
+ res.json({mastery,stage:currentStage(mastery),totals,sessions,errors});
 });
 
 app.get("/api/practice-groups",(req,res)=>{
- const groups=db.prepare("SELECT id,mode,skill_id,title,exercise_count,created_at FROM practice_groups ORDER BY id DESC LIMIT 300").all();
+ const groups=db.prepare(`SELECT g.id,g.mode,g.skill_id,g.title,g.exercise_count,g.favorite,g.created_at,
+  (SELECT COUNT(*) FROM practice_sessions s WHERE s.group_id=g.id) session_count,
+  (SELECT ROUND(100.0*s.correct_count/NULLIF(s.total_items,0)) FROM practice_sessions s WHERE s.group_id=g.id AND s.status='completed' ORDER BY s.id DESC LIMIT 1) last_score
+  FROM practice_groups g ORDER BY g.favorite DESC,g.id DESC LIMIT 300`).all();
  res.json({groups:groups.map(g=>({...g,skillName:g.skill_id?(skillMap[g.skill_id]?.name||g.skill_id):null}))});
 });
 
 app.get("/api/practice-groups/:id",(req,res)=>{
  const id=Number(req.params.id);
  if(!Number.isInteger(id)||id<1) return res.status(400).json({error:"Invalid practice group id"});
- const group=db.prepare("SELECT id,mode,skill_id,title,exercise_count,created_at FROM practice_groups WHERE id=?").get(id);
+ const group=db.prepare("SELECT id,mode,skill_id,title,exercise_count,favorite,created_at FROM practice_groups WHERE id=?").get(id);
  if(!group) return res.status(404).json({error:"Practice group not found"});
  const items=db.prepare("SELECT exercise_json FROM practice_group_items WHERE group_id=? ORDER BY position").all(id);
  res.json({group:{...group,skillName:group.skill_id?(skillMap[group.skill_id]?.name||group.skill_id):null},exercises:items.map(x=>JSON.parse(x.exercise_json))});
+});
+
+app.patch("/api/practice-groups/:id",(req,res)=>{
+ const id=Number(req.params.id);
+ const group=db.prepare("SELECT * FROM practice_groups WHERE id=?").get(id);
+ if(!group) return res.status(404).json({error:"Practice group not found"});
+ const title=req.body?.title===undefined?group.title:String(req.body.title).trim();
+ const favorite=req.body?.favorite===undefined?group.favorite:(req.body.favorite?1:0);
+ if(!title) return res.status(400).json({error:"Title cannot be empty"});
+ db.prepare("UPDATE practice_groups SET title=?,favorite=? WHERE id=?").run(title,favorite,id);
+ res.json({ok:true,id,title,favorite});
+});
+
+app.delete("/api/practice-groups/:id",(req,res)=>{
+ const id=Number(req.params.id);
+ const info=db.prepare("DELETE FROM practice_groups WHERE id=?").run(id);
+ if(!info.changes) return res.status(404).json({error:"Practice group not found"});
+ res.json({ok:true});
+});
+
+function createPracticeSession(groupId){
+ const group=db.prepare("SELECT id,title,mode,exercise_count FROM practice_groups WHERE id=?").get(groupId);
+ if(!group) throw new Error("Practice group not found");
+ const rows=db.prepare("SELECT position,exercise_id,skill_id,exercise_json FROM practice_group_items WHERE group_id=? ORDER BY position").all(groupId);
+ const run=db.transaction(()=>{
+  const info=db.prepare("INSERT INTO practice_sessions(group_id,title,mode,total_items) VALUES(?,?,?,?)").run(group.id,group.title,group.mode,rows.length);
+  const sessionId=Number(info.lastInsertRowid);
+  const ins=db.prepare("INSERT INTO practice_session_items(session_id,position,exercise_id,skill_id,exercise_json) VALUES(?,?,?,?,?)");
+  rows.forEach(r=>ins.run(sessionId,r.position,r.exercise_id,r.skill_id,r.exercise_json));
+  return sessionId;
+ });
+ return run();
+}
+
+function sessionPayload(id){
+ const session=db.prepare("SELECT * FROM practice_sessions WHERE id=?").get(id);
+ if(!session) return null;
+ const items=db.prepare("SELECT position,exercise_json,answer,correct,completed,attempt_count,hint_level,model_viewed,first_try_correct,last_feedback_json FROM practice_session_items WHERE session_id=? ORDER BY position").all(id)
+  .map(r=>({...r,exercise:JSON.parse(r.exercise_json),feedback:r.last_feedback_json?JSON.parse(r.last_feedback_json):null}));
+ return {session,items};
+}
+
+app.post("/api/practice-groups/:id/start",(req,res)=>{
+ try{
+  const sessionId=createPracticeSession(Number(req.params.id));
+  res.json(sessionPayload(sessionId));
+ }catch(e){res.status(404).json({error:e.message});}
+});
+
+app.get("/api/practice-groups/:id/active-session",(req,res)=>{
+ const id=Number(req.params.id);
+ const row=db.prepare("SELECT id FROM practice_sessions WHERE group_id=? AND status='in_progress' ORDER BY id DESC LIMIT 1").get(id);
+ res.json(row?sessionPayload(row.id):{session:null,items:[]});
+});
+
+app.get("/api/sessions/:id",(req,res)=>{
+ const payload=sessionPayload(Number(req.params.id));
+ if(!payload) return res.status(404).json({error:"Practice session not found"});
+ res.json(payload);
+});
+
+app.patch("/api/sessions/:id",(req,res)=>{
+ const id=Number(req.params.id),currentIndex=Number(req.body?.currentIndex);
+ if(!Number.isInteger(currentIndex)||currentIndex<0) return res.status(400).json({error:"Invalid currentIndex"});
+ const info=db.prepare("UPDATE practice_sessions SET current_index=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(currentIndex,id);
+ if(!info.changes) return res.status(404).json({error:"Practice session not found"});
+ res.json({ok:true});
+});
+
+app.patch("/api/sessions/:id/items/:position",(req,res)=>{
+ const id=Number(req.params.id),position=Number(req.params.position);
+ const row=db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(id,position);
+ if(!row) return res.status(404).json({error:"Session item not found"});
+ const answer=req.body?.answer===undefined?row.answer:String(req.body.answer);
+ const hintLevel=req.body?.hintLevel===undefined?row.hint_level:Math.max(0,Math.min(3,Number(req.body.hintLevel)||0));
+ const modelViewed=req.body?.modelViewed===undefined?row.model_viewed:(req.body.modelViewed?1:0);
+ db.prepare("UPDATE practice_session_items SET answer=?,hint_level=?,model_viewed=?,updated_at=CURRENT_TIMESTAMP WHERE session_id=? AND position=?").run(answer,hintLevel,modelViewed,id,position);
+ db.prepare("UPDATE practice_sessions SET current_index=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(position,id);
+ res.json({ok:true});
 });
 
 app.get("/api/history",(req,res)=>{
@@ -414,22 +599,45 @@ app.post("/api/state",(req,res)=>{
 
 app.post("/api/check",async(req,res)=>{
  try{
-  const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,exerciseType}=req.body??{};
-  if(exerciseId===undefined||!prompt||!answer||!skillId)return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
+  const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
+  if(exerciseId===undefined||!prompt||!answer||!skillId) return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
   const skill=skillMap[skillId];
-  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short grammar category or 'none'. Keep feedback child-friendly.";
+  const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
+  const previousAttempts=sessionItem?.attempt_count||0;
+  const firstTry=previousAttempts===0;
+  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly.";
   const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
   const r=await runWritingCheck(input,instructions);
+  let evidence=0;
+  if(r.skillSuccess){
+   if(modelViewed) evidence=.25;
+   else if(Number(hintLevel)>=2) evidence=.45;
+   else if(Number(hintLevel)===1) evidence=.65;
+   else if(firstTry) evidence=1;
+   else evidence=.8;
+  }
   const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today());
   const aid=Number(info.lastInsertRowid);
-  db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success) VALUES(?,?,?)").run(aid,skillId,r.skillSuccess?1:0);
-  const q=db.prepare("SELECT * FROM review_queue WHERE skill_id=?").get(skillId);
-  if(r.skillSuccess){
-   if(q){const streak=q.streak+1;if(streak>=4)db.prepare("DELETE FROM review_queue WHERE skill_id=?").run(skillId);else db.prepare("UPDATE review_queue SET due_date=?,streak=?,updated_at=CURRENT_TIMESTAMP WHERE skill_id=?").run(addDays(nextReviewDays(streak)),streak,skillId);}
-  }else{
-   db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),r.errorTag);
+  db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+
+  if(sessionItem){
+   const newAttemptCount=previousAttempts+1;
+   const firstTryCorrect=sessionItem.first_try_correct||(firstTry&&r.correct?1:0);
+   db.prepare("UPDATE practice_session_items SET answer=?,correct=?,completed=?,attempt_count=?,hint_level=?,model_viewed=?,first_try_correct=?,last_feedback_json=?,updated_at=CURRENT_TIMESTAMP WHERE session_id=? AND position=?")
+    .run(answer,r.correct?1:0,r.correct?1:sessionItem.completed,newAttemptCount,Math.max(sessionItem.hint_level,Number(hintLevel)||0),sessionItem.model_viewed||(modelViewed?1:0),firstTryCorrect,JSON.stringify(r),Number(sessionId),Number(position));
+   const stats=db.prepare("SELECT COUNT(*) total,SUM(completed) completed,SUM(correct) correct,SUM(first_try_correct) first_try_correct FROM practice_session_items WHERE session_id=?").get(Number(sessionId));
+   const done=Number(stats.completed||0)>=Number(stats.total||0);
+   db.prepare("UPDATE practice_sessions SET current_index=?,correct_count=?,first_try_correct=?,status=?,updated_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=?")
+    .run(Number(position),Number(stats.correct||0),Number(stats.first_try_correct||0),done?"completed":"in_progress",done?1:0,Number(sessionId));
   }
-  res.json({...r,attemptId:aid});
+
+  const q=db.prepare("SELECT * FROM review_queue WHERE skill_id=?").get(skillId);
+  if(r.skillSuccess&&evidence>=.65){
+   if(q){const streak=q.streak+1;if(streak>=4) db.prepare("DELETE FROM review_queue WHERE skill_id=?").run(skillId);else db.prepare("UPDATE review_queue SET due_date=?,streak=?,updated_at=CURRENT_TIMESTAMP WHERE skill_id=?").run(addDays(nextReviewDays(streak)),streak,skillId);}
+  }else if(!r.skillSuccess||evidence<.65){
+   db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),r.errorTag||"assisted_success");
+  }
+  res.json({...r,attemptId:aid,evidenceScore:evidence,firstTry});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"LLM request failed"});}
 });
 
