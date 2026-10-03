@@ -28,7 +28,7 @@ export const skillMap = Object.fromEntries(SKILLS.map(s => [s.id, s]));
 export function statusFromMastery(score, attempts) {
   if (!attempts) return "Not started";
   if (score >= 85 && attempts >= 4) return "Mastered";
-  if (score >= 70 && attempts >= 2) return "Stable";
+  if (score >= 75 && attempts >= 2) return "Stable";
   if (score >= 45) return "Improving";
   return "Learning";
 }
