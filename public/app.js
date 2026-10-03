@@ -312,12 +312,14 @@ async function loadProgress(){
 async function showErrorDetail(tag){
  const box=$("errorDetail");
  box.className="drilldown";
- box.innerHTML='<p class="muted">Loading '+esc(tag.replaceAll("_"," "))+'…</p>';
+ box.innerHTML='<p class="muted">Loading '+esc(tag.replaceAll("_"," "))+"…</p>";
  try{
   const d=await get("/api/errors/"+encodeURIComponent(tag)+"?days=30");
-  box.innerHTML='<div class="drill-head"><div><h3>'+esc(tag.replaceAll("_"," "))+'</h3><p class="muted">'+d.count+' records in the last '+d.days+' days'+(d.bySkill?.length?' • '+d.bySkill.map(x=>esc(x.skill_id)+" "+x.count).join(", "):'')+'</p></div><button data-close-drill="error">Close</button></div>'+
+  const skillButtons=d.bySkill?.length?'<div class="blocker-list">'+d.bySkill.map(x=>'<button class="blocker" data-error-skill="'+esc(x.skill_id)+'">'+esc(x.skill_id.replaceAll("_"," "))+" · "+x.count+"</button>").join("")+"</div>":"";
+  box.innerHTML='<div class="drill-head"><div><h3>'+esc(tag.replaceAll("_"," "))+"</h3><p class=\"muted\">"+d.count+" records in the last "+d.days+" days</p></div><button data-close-drill=\"error\">Close</button></div>"+
+   (skillButtons?'<p><b>Related skills — click to practice:</b></p>'+skillButtons:"")+
    (d.attempts.length?d.attempts.map(attemptCard).join(""):'<p class="muted">No matching attempts.</p>');
- }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+'</div>';}
+ }catch(e){box.innerHTML='<div class="result bad">'+esc(e.message)+"</div>";}
 }
 
 async function showSkillDetail(id){
@@ -441,6 +443,7 @@ function toggleAttemptDetail(target){
 }
 $("errorDetail").onclick=e=>{
  toggleAttemptDetail(e.target);
+ const skill=e.target.closest("[data-error-skill]");if(skill)startSkill(skill.dataset.errorSkill);
  if(e.target.closest('[data-close-drill="error"]')) $("errorDetail").className="drilldown hidden";
 };
 $("skillDetail").onclick=e=>{
