@@ -5,7 +5,7 @@ title Writing Trainer - LAN
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo Node.js 20 or newer is required.
+  echo [ERROR] Node.js 20 or newer is required.
   pause
   exit /b 1
 )
@@ -17,9 +17,18 @@ if not exist ".env" (
   pause >nul
 )
 
+echo [SETUP] Checking dependencies...
 call npm install --no-fund --no-audit
 if errorlevel 1 (
-  echo npm install failed.
+  echo [ERROR] npm install failed.
+  pause
+  exit /b 1
+)
+
+echo [CHECK] Running syntax checks...
+call npm test
+if errorlevel 1 (
+  echo [ERROR] Code validation failed. Writing Trainer was not started.
   pause
   exit /b 1
 )
