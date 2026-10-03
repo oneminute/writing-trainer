@@ -240,12 +240,14 @@ function showSessionReport(payload){
  const s=payload.session;
  const accuracy=s.total_items?Math.round((s.correct_count||0)/s.total_items*100):0;
  const first=s.total_items?Math.round((s.first_try_correct||0)/s.total_items*100):0;
+ const independent=s.total_items?Math.round((s.independent_correct||0)/s.total_items*100):0;
  $("report").classList.remove("hidden");
- $("report").innerHTML='<h2>Practice Complete</h2><div class="summary-grid">'+
+ $("report").innerHTML='<h2>Practice Complete</h2><div class="summary-grid four">'+
   '<div><b>'+s.correct_count+'/'+s.total_items+'</b><span>Completed correctly</span></div>'+
   '<div><b>'+accuracy+'%</b><span>Final accuracy</span></div>'+
   '<div><b>'+first+'%</b><span>First-try accuracy</span></div>'+
-  '</div><p class="muted">This session is saved. You can practice the same set again later from Sets.</p>';
+  '<div><b>'+independent+'%</b><span>Independent accuracy</span></div>'+
+  '</div><p class="muted">Independent means correct on the first check without hints or opening the model answer. This session is saved in Sets.</p>';
 }
 
 function attemptCard(a){
@@ -273,7 +275,7 @@ async function loadProgress(){
 
  $("progressSummary").innerHTML=
   '<div class="dash-card"><span>Last 7 days</span><b>'+d.last7.questions+'</b><small>questions attempted</small></div>'+
-  '<div class="dash-card"><span>7-day independent</span><b>'+d.last7.firstTryRate+'%</b><small>first-try accuracy</small></div>'+
+  '<div class="dash-card"><span>7-day independent</span><b>'+d.last7.independentRate+'%</b><small>without hints or model answer</small></div>'+
   '<div class="dash-card"><span>Last 30 days</span><b>'+d.last30.questions+'</b><small>questions attempted</small></div>'+
   '<div class="dash-card"><span>30-day errors</span><b>'+d.last30.errors+'</b><small>recorded error checks</small></div>'+
   '<div class="dash-card"><span>Hints · 30 days</span><b>'+d.last30.hintUsed+'</b><small>questions using hints</small></div>'+
@@ -295,7 +297,8 @@ async function loadProgress(){
  $("recentSessionsList").innerHTML=d.recentSessions?.length?d.recentSessions.map(s=>{
   const score=s.total_items?Math.round(Number(s.correct_count||0)/Number(s.total_items)*100):0;
   const first=s.total_items?Math.round(Number(s.first_try_correct||0)/Number(s.total_items)*100):0;
-  return '<div class="session-row"><div><b>'+esc(s.title)+'</b><small>'+esc(s.mode)+' • '+esc((s.started_at||"").replace("T"," ").slice(0,16))+' • '+esc(s.status)+'</small></div><span>'+score+'% final • '+first+'% first try</span></div>';
+  const independent=s.total_items?Math.round(Number(s.independent_correct||0)/Number(s.total_items)*100):0;
+  return '<div class="session-row"><div><b>'+esc(s.title)+'</b><small>'+esc(s.mode)+' • '+esc((s.started_at||"").replace("T"," ").slice(0,16))+' • '+esc(s.status)+'</small></div><span>'+score+'% final • '+first+'% first try • '+independent+'% independent</span></div>';
  }).join(""):'<p class="muted">No saved sessions yet.</p>';
 
  $("errorList").innerHTML=d.errors?.length?d.errors.map(x=>'<button class="error-chip" data-error-tag="'+esc(x.error)+'"><b>'+esc(x.error.replaceAll("_"," "))+'</b><span>'+x.count+'</span></button>').join(""):'<p class="muted">No recurring errors recorded in the last 30 days.</p>';
