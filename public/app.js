@@ -256,15 +256,16 @@ function attemptCard(a){
  if(Number(a.hint_level||0)>0) assistance.push("Hint "+a.hint_level);
  if(Number(a.model_viewed||0)===1) assistance.push("Model viewed");
  if(Number(a.first_try||0)===1) assistance.push("First try");
+ const context=(a.session_title?" • "+esc(a.session_title):"")+(a.session_mode?" • "+esc(a.session_mode):"");
  return '<div class="attempt-card" data-attempt-id="'+a.id+'">'+
-  '<div class="attempt-summary"><div><b>'+(a.correct?"✓ ":"△ ")+esc(a.answer||"")+'</b><small>'+esc(a.session_date||a.created_at||"")+' • '+esc(a.skill_id||"legacy")+(a.error_tag&&a.error_tag!=="none"?' • '+esc(a.error_tag):'')+'</small></div>'+
+  '<div class="attempt-summary"><div><b>'+(a.correct?"✓ ":"△ ")+esc(a.answer||"")+'</b><small>'+esc(a.session_date||a.created_at||"")+' • '+esc(a.skill_id||"legacy")+context+(a.error_tag&&a.error_tag!=="none"?' • '+esc(a.error_tag):"")+'</small></div>'+
   '<button data-history-toggle="'+a.id+'">Details</button></div>'+
   '<div class="attempt-detail hidden">'+
    '<p><b>Prompt:</b> '+esc(a.prompt||"")+'</p>'+
    '<p><b>Feedback:</b> '+esc(a.feedback||"")+'</p>'+
    '<p><b>Suggestion:</b> '+esc(a.suggestion||"")+'</p>'+
    '<p><b>Better sentence:</b> '+esc(a.better_sentence||"")+'</p>'+
-   '<p class="muted">Evidence '+evidence+(assistance.length?' • '+esc(assistance.join(" • ")):'')+'</p>'+
+   '<p class="muted">Evidence '+evidence+(assistance.length?' • '+esc(assistance.join(" • ")):"")+'</p>'+
   '</div></div>';
 }
 
@@ -385,15 +386,19 @@ async function loadHistory(){
  const skill=$("historySkill").value;
  const error=$("historyError").value;
  const result=$("historyResult").value;
+ const mode=$("historyMode").value;
  const days=$("historyDays").value;
  const qs=new URLSearchParams({days,result});
  if(skill) qs.set("skill",skill);
  if(error) qs.set("error",error);
+ if(mode) qs.set("mode",mode);
  const d=await get("/api/history?"+qs.toString());
 
- const oldSkill=skill,oldError=error;
- $("historySkill").innerHTML='<option value="">All skills</option>'+d.options.skills.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+'</option>').join("");
- $("historyError").innerHTML='<option value="">All errors</option>'+d.options.errors.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+'</option>').join("");
+ const oldSkill=skill,oldError=error,oldMode=mode;
+ $("historyMode").innerHTML='<option value="">All practice</option>'+d.options.modes.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+" practice</option>").join("");
+ $("historySkill").innerHTML='<option value="">All skills</option>'+d.options.skills.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+"</option>").join("");
+ $("historyError").innerHTML='<option value="">All errors</option>'+d.options.errors.map(x=>'<option value="'+esc(x)+'">'+esc(x.replaceAll("_"," "))+"</option>").join("");
+ if(d.options.modes.includes(oldMode)) $("historyMode").value=oldMode;
  if(d.options.skills.includes(oldSkill)) $("historySkill").value=oldSkill;
  if(d.options.errors.includes(oldError)) $("historyError").value=oldError;
  $("historyResult").value=result;
@@ -444,7 +449,7 @@ $("skillDetail").onclick=e=>{
  if(e.target.closest('[data-close-drill="skill"]')) $("skillDetail").className="drilldown hidden";
 };
 $("historyList").onclick=e=>{toggleAttemptDetail(e.target);};
-["historyDays","historySkill","historyError","historyResult"].forEach(id=>$(id).addEventListener("change",()=>loadHistory().catch(e=>alert(e.message))));
+["historyDays","historyMode","historySkill","historyError","historyResult"].forEach(id=>$(id).addEventListener("change",()=>loadHistory().catch(e=>alert(e.message))));
 
 document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{
  activateView(b.dataset.view);
