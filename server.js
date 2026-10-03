@@ -9,8 +9,54 @@ import { BASE_EXERCISES } from "./src/exercises.js";
 
 const app = express();
 const port = process.env.PORT || 5178;
-const model = process.env.OPENAI_MODEL || "gpt-5.6-luna";
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const llmProvider = (process.env.LLM_PROVIDER || "ollama").toLowerCase();
+const ollamaBaseUrl = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const ollamaModel = process.env.OLLAMA_WRITING_MODEL || "hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL";
+const ollamaTimeoutMs = Number(process.env.OLLAMA_WRITING_TIMEOUT_SECONDS || 60) * 1000;
+const openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna";
+const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+async function checkWithOllama(input, instructions) {
+ const controller = new AbortController();
+ const timer = setTimeout(() => controller.abort(), ollamaTimeoutMs);
+ try {
+  const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+   method:"POST", headers:{"Content-Type":"application/json"}, signal:controller.signal,
+   body:JSON.stringify({
+    model:ollamaModel, stream:false, think:false, keep_alive:"10m",
+    format:schema,
+    options:{temperature:0},
+    messages:[
+     {role:"system",content:instructions + " Return ONLY valid JSON matching the requested fields."},
+     {role:"user",content:input}
+    ]
+   })
+  });
+  if(!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
+  const data=await response.json();
+  return {...JSON.parse(data.message?.content || "{}"), provider:`ollama:${ollamaModel}`};
+ } finally { clearTimeout(timer); }
+}
+
+async function checkWithOpenAI(input, instructions) {
+ if(!client) throw new Error("OPENAI_API_KEY is not configured");
+ const response=await client.responses.create({
+  model:openaiModel, reasoning:{effort:"none"}, max_output_tokens:260,
+  instructions, input,
+  text:{format:{type:"json_schema",name:"writing_check",strict:true,schema}}
+ });
+ return {...JSON.parse(response.output_text),provider:`openai:${openaiModel}`};
+}
+
+async function runWritingCheck(input, instructions) {
+ if(llmProvider==="ollama") return checkWithOllama(input,instructions);
+ if(llmProvider==="openai") return checkWithOpenAI(input,instructions);
+ if(llmProvider==="auto"){
+  try { return await checkWithOllama(input,instructions); }
+  catch(error){ console.warn("Ollama failed; using OpenAI fallback:",error.message); return checkWithOpenAI(input,instructions); }
+ }
+ throw new Error("LLM_PROVIDER must be ollama, openai, or auto");
+}
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dataDir = path.join(__dirname, "data");
@@ -127,13 +173,9 @@ app.post("/api/check",async(req,res)=>{
   const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,exerciseType}=req.body??{};
   if(exerciseId===undefined||!prompt||!answer||!skillId)return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
   const skill=skillMap[skillId];
-  const response=await client.responses.create({
-   model,reasoning:{effort:"none"},max_output_tokens:260,
-   instructions:"You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short grammar category or 'none'. Keep feedback child-friendly.",
-   input:`Prompt: ${prompt}\nTarget skill: ${skill?.name||skillId}\nFocus: ${grammarFocus||""}\nStudent: ${answer}\nReference only: ${modelAnswer||"(none)"}`,
-   text:{format:{type:"json_schema",name:"writing_check",strict:true,schema}}
-  });
-  const r=JSON.parse(response.output_text);
+  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short grammar category or 'none'. Keep feedback child-friendly.";
+  const input=`Prompt: ${prompt}\nTarget skill: ${skill?.name||skillId}\nFocus: ${grammarFocus||""}\nStudent: ${answer}\nReference only: ${modelAnswer||"(none)"}\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).`;
+  const r=await runWritingCheck(input,instructions);
   const info=db.prepare(`INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date)
    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today());
   const aid=Number(info.lastInsertRowid);
@@ -151,6 +193,16 @@ app.post("/api/check",async(req,res)=>{
   }
   res.json({...r,attemptId:aid});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"OpenAI request failed"});}
+});
+
+app.get("/api/health",async(req,res)=>{
+ let ollamaAvailable=false;
+ try{
+  const c=new AbortController(); const t=setTimeout(()=>c.abort(),1500);
+  const r=await fetch(`${ollamaBaseUrl}/api/tags`,{signal:c.signal}); clearTimeout(t);
+  ollamaAvailable=r.ok;
+ }catch{}
+ res.json({llm_provider:llmProvider,ollama_available:ollamaAvailable,ollama_base_url:ollamaBaseUrl,ollama_writing_model:ollamaModel,openai_enabled:Boolean(client),openai_model:openaiModel});
 });
 
 app.post("/api/complete-day",(req,res)=>{
