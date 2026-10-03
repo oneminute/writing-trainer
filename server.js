@@ -169,3 +169,72 @@ app.get("/api/today",(req,res)=>{
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
  const cached=db.prepare("SELECT exercises_json FROM generated_sets WHERE set_key=?").get("today:"+date);
  res.json({date,stage:currentStage(mastery),exercises:cached?JSON.parse(cached.exercises_json):BASE_EXERCISES,dueReviews:due,mastery,generated:Boolean(cached)});
+});
+
+app.get("/api/progress",(req,res)=>{
+ const mastery=masteryRows();
+ const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
+ res.json({mastery,stage:currentStage(mastery),totals});
+});
+
+app.get("/api/history",(req,res)=>{
+ const rows=db.prepare("SELECT id,session_date,exercise_id,exercise_type,skill_id,prompt,answer,correct,feedback,suggestion,better_sentence,created_at FROM attempts ORDER BY id DESC LIMIT 200").all();
+ res.json({attempts:rows});
+});
+
+app.get("/api/review",(req,res)=>{
+ const rows=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date, skill_id").all(today());
+ res.json({reviews:rows});
+});
+
+app.get("/api/report",(req,res)=>{
+ const date=String(req.query.date||today());
+ const rows=db.prepare("SELECT * FROM attempts WHERE session_date=? ORDER BY id").all(date);
+ const skillRows=db.prepare("SELECT sa.skill_id, COUNT(*) attempts, SUM(sa.success) successes FROM skill_attempts sa JOIN attempts a ON a.id=sa.attempt_id WHERE a.session_date=? GROUP BY sa.skill_id").all(date);
+ const strong=skillRows.filter(x=>x.successes/x.attempts>=.8).map(x=>skillMap[x.skill_id]?.name||x.skill_id);
+ const weak=skillRows.filter(x=>x.successes/x.attempts<.8).map(x=>skillMap[x.skill_id]?.name||x.skill_id);
+ res.json({date,attempts:rows.length,correct:rows.filter(x=>x.correct).length,strong,weak,mistakes:rows.filter(x=>!x.correct).slice(-5).map(x=>({answer:x.answer,feedback:x.feedback,better:x.better_sentence}))});
+});
+
+app.post("/api/state",(req,res)=>{
+ const n=req.body?.currentExercise;
+ if(Number.isInteger(n)&&n>=0)setState.run("currentExercise",String(n));
+ res.json({ok:true});
+});
+
+app.post("/api/check",async(req,res)=>{
+ try{
+  const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,exerciseType}=req.body??{};
+  if(exerciseId===undefined||!prompt||!answer||!skillId)return res.status(400).json({error:"exerciseId, prompt, answer and skillId are required"});
+  const skill=skillMap[skillId];
+  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short grammar category or 'none'. Keep feedback child-friendly.";
+  const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
+  const r=await runWritingCheck(input,instructions);
+  const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today());
+  const aid=Number(info.lastInsertRowid);
+  db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success) VALUES(?,?,?)").run(aid,skillId,r.skillSuccess?1:0);
+  const q=db.prepare("SELECT * FROM review_queue WHERE skill_id=?").get(skillId);
+  if(r.skillSuccess){
+   if(q){const streak=q.streak+1;if(streak>=4)db.prepare("DELETE FROM review_queue WHERE skill_id=?").run(skillId);else db.prepare("UPDATE review_queue SET due_date=?,streak=?,updated_at=CURRENT_TIMESTAMP WHERE skill_id=?").run(addDays(nextReviewDays(streak)),streak,skillId);}
+  }else{
+   db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),r.errorTag);
+  }
+  res.json({...r,attemptId:aid});
+ }catch(e){console.error(e);res.status(500).json({error:e?.message||"LLM request failed"});}
+});
+
+app.get("/api/health",async(req,res)=>{
+ let ollamaAvailable=false;
+ try{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),1500);const r=await fetch(ollamaBaseUrl+"/api/tags",{signal:controller.signal});clearTimeout(timer);ollamaAvailable=r.ok;}catch{}
+ res.json({llm_provider:llmProvider,ollama_available:ollamaAvailable,ollama_base_url:ollamaBaseUrl,ollama_writing_model:ollamaModel,openai_enabled:Boolean(client),openai_model:openaiModel});
+});
+
+app.post("/api/complete-day",(req,res)=>{
+ const date=today();
+ db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
+ db.prepare("UPDATE daily_sessions SET completed=1,completed_at=CURRENT_TIMESTAMP WHERE session_date=?").run(date);
+ res.json({ok:true,date});
+});
+
+const host=process.env.HOST||"127.0.0.1";
+app.listen(port,host,()=>console.log("Writing Trainer running on "+host+":"+port));
