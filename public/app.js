@@ -66,6 +66,15 @@ function render(){
  const state=sessionItemAt(index);
  $("type").textContent=String(q.type||"practice").replaceAll("_"," ");
  $("focus").textContent=q.focus||q.skill||"";
+ const meta=q.planMeta||{};
+ $("lessonContext").innerHTML=
+  '<div class="lesson-breadcrumb">'+
+   (meta.stage?'<span class="curriculum-chip stage-chip">Stage '+esc(meta.stage)+(meta.stageTitle?' · '+esc(meta.stageTitle):'')+'</span>':'')+
+   (meta.lessonTitle?'<span class="curriculum-chip lesson-chip">Lesson · '+esc(meta.lessonTitle)+'</span>':'')+
+   (meta.skillName?'<span class="curriculum-chip skill-chip">Skill · '+esc(meta.skillName)+'</span>':'')+
+  '</div>'+
+  (meta.objective?'<div class="lesson-objective"><b>Practice target:</b> '+esc(meta.objective)+'</div>':'')+
+  (meta.difficulty?'<div class="lesson-difficulty">'+esc(meta.difficulty)+'</div>':'');
  $("prompt").textContent=q.prompt||"";
  $("progressText").textContent=(index+1)+" / "+exercises.length;
  $("progressBar").style.width=((index+1)/exercises.length*100)+"%";
