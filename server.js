@@ -385,12 +385,21 @@ function skillReadyForNextStage(skill){
  return skill.attempts>=2 && skill.score>=75;
 }
 
-function currentStage(mastery){
+function lessonReadyForNextStage(lesson){
+ return lesson.attempts>=2 && lesson.score>=75;
+}
+
+function currentStage(){
+ const lessons=lessonMasteryRows();
  for(let stage=1;stage<=12;stage++){
-   const relevant=mastery.filter(x=>x.stage===stage);
-   if(relevant.length && relevant.some(x=>!skillReadyForNextStage(x))) return stage;
+  const relevant=lessons.filter(x=>x.stage===stage);
+  if(relevant.length&&relevant.some(x=>!lessonReadyForNextStage(x))) return stage;
  }
  return 12;
+}
+
+function stageSkillIds(stage){
+ return db.prepare("SELECT DISTINCT skill_id FROM curriculum_lessons WHERE stage=? AND enabled=1 ORDER BY order_in_stage,skill_id").all(stage).map(x=>x.skill_id);
 }
 
 
@@ -440,7 +449,7 @@ function validateGeneratedExercises(exercises,allowed,count,mode){
 function todaySkillIds(mastery,stage,date){
  const due=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 2").all(date).map(x=>x.skill_id);
  const weak=mastery.filter(x=>x.attempts&&x.score<70).sort((a,b)=>a.score-b.score).slice(0,2).map(x=>x.id);
- const current=SKILLS.filter(x=>x.stage===stage).map(x=>x.id);
+ const current=stageSkillIds(stage);
  const skills=[...new Set([...due,...weak,...current])];
  return skills.length?skills:SKILLS.filter(x=>x.stage<=Math.max(2,stage)).slice(0,6).map(x=>x.id);
 }
@@ -454,7 +463,7 @@ function cyclePick(items,count,fallback=[]){
 function buildTodaySkillSequence(mastery,stage,date,count){
  const due=db.prepare("SELECT skill_id FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date).map(x=>x.skill_id).filter(x=>skillMap[x]);
  const weak=mastery.filter(x=>x.attempts&&x.score<70).sort((a,b)=>a.score-b.score).map(x=>x.id);
- const current=SKILLS.filter(x=>x.stage===stage).map(x=>x.id);
+ const current=stageSkillIds(stage);
  const learned=mastery.filter(x=>x.attempts>0&&x.status!=="Not started").map(x=>x.id);
  const reviewN=Math.min(count,Math.max(1,Math.round(count*0.17)));
  const weakN=Math.min(count-reviewN,Math.max(1,Math.round(count*0.17)));
@@ -729,13 +738,13 @@ app.get("/api/plan",(req,res)=>{
   generationGuardrails:parseJsonArray(s.generation_guardrails_json),
   lessons:lessons.filter(l=>l.stage===s.stage)
  }));
- res.json({curriculumVersion:CURRICULUM_VERSION,currentStage:currentStage(skills),skills,stages});
+ res.json({curriculumVersion:CURRICULUM_VERSION,currentStage:currentStage(),skills,stages});
 });
 
 app.post("/api/generate",async(req,res)=>{
  try{
   const mode=String(req.body?.mode||"today"), requestedSkill=String(req.body?.skillId||""), requestedLesson=String(req.body?.lessonId||""), force=Boolean(req.body?.force);
-  const mastery=masteryRows(),stage=currentStage(mastery),date=today(); let skills=[],count=getPracticeCount(),setKey="",sequence=[];
+  const mastery=masteryRows(),stage=currentStage(),date=today(); let skills=[],count=getPracticeCount(),setKey="",sequence=[];
   if(mode==="skill"){
    if(!skillMap[requestedSkill]) return res.status(400).json({error:"Unknown skill"});
    skills=[requestedSkill];sequence=buildSkillSequence(skills,count);setKey="skill:"+requestedSkill+":"+(requestedLesson||"all")+":"+date;
@@ -771,7 +780,7 @@ app.get("/api/today",(req,res)=>{
  const date=today();
  db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
  const mastery=masteryRows();
- const stage=currentStage(mastery);
+ const stage=currentStage();
  const practiceCount=getPracticeCount();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
  const sequence=buildTodaySkillSequence(mastery,stage,date,practiceCount);
@@ -826,10 +835,11 @@ function periodMetrics(days){
 
 app.get("/api/progress",(req,res)=>{
  const mastery=masteryRows();
- const stage=currentStage(mastery);
- const stageSkills=mastery.filter(x=>x.stage===stage);
- const stableSkills=stageSkills.filter(skillReadyForNextStage);
- const blockers=stageSkills.filter(x=>!skillReadyForNextStage(x)).sort((a,b)=>(a.attempts-b.attempts)||(a.score-b.score));
+ const lessonMastery=lessonMasteryRows();
+ const stage=currentStage();
+ const stageLessons=lessonMastery.filter(x=>x.stage===stage);
+ const stableLessons=stageLessons.filter(lessonReadyForNextStage);
+ const blockers=stageLessons.filter(x=>!lessonReadyForNextStage(x)).sort((a,b)=>(a.attempts-b.attempts)||(a.score-b.score));
  const totals=db.prepare("SELECT COUNT(*) attempts, SUM(correct) correct FROM attempts").get();
  const sessions=db.prepare("SELECT COUNT(*) total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed FROM practice_sessions").get();
  const errors=db.prepare(`SELECT error_tag error,COUNT(*) count
@@ -849,11 +859,24 @@ app.get("/api/progress",(req,res)=>{
   mastery,stage,totals,sessions,errors,trend,recentSessions,
   last7:periodMetrics(7),last30:periodMetrics(30),
   stageProgress:{
-   stage,total:stageSkills.length,stable:stableSkills.length,
-   percent:stageSkills.length?Math.round(stableSkills.length/stageSkills.length*100):100,
-   blockers:blockers.map(x=>({id:x.id,name:x.name,score:x.score,status:x.status,attempts:x.attempts,neededAttempts:Math.max(0,2-x.attempts)}))
+   stage,total:stageLessons.length,stable:stableLessons.length,
+   percent:stageLessons.length?Math.round(stableLessons.length/stageLessons.length*100):100,
+   blockers:blockers.map(x=>({id:x.id,name:x.title,skillId:x.skill_id,score:x.score,status:x.status,attempts:x.attempts,neededAttempts:Math.max(0,2-x.attempts)}))
   }
  });
+});
+
+app.get("/api/lessons/:id",(req,res)=>{
+ const id=String(req.params.id||"");
+ const lesson=lessonMasteryRows().find(x=>x.id===id);
+ if(!lesson) return res.status(404).json({error:"Unknown curriculum lesson"});
+ const attempts=db.prepare(`SELECT a.id,a.session_date,a.prompt,a.answer,a.correct,a.error_tag,a.feedback,a.suggestion,a.better_sentence,a.created_at,a.lesson_id,
+  la.success,la.evidence_score,la.first_try,la.hint_level,la.model_viewed,ps.title session_title,ps.mode session_mode
+  FROM attempts a
+  LEFT JOIN lesson_attempts la ON la.attempt_id=a.id AND la.lesson_id=?
+  LEFT JOIN practice_sessions ps ON ps.id=a.session_id
+  WHERE a.lesson_id=? ORDER BY a.id DESC LIMIT 30`).all(id,id);
+ res.json({lesson,attempts});
 });
 
 app.get("/api/skills/:id",(req,res)=>{
