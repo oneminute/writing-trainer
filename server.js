@@ -243,5 +243,11 @@ app.post("/api/complete-day",(req,res)=>{
  res.json({ok:true,date});
 });
 
+app.use((err,req,res,next)=>{
+ console.error(err);
+ if(res.headersSent)return next(err);
+ res.status(500).json({error:err?.message||"Server error"});
+});
+
 const host=process.env.HOST||"127.0.0.1";
 app.listen(port,host,()=>console.log("Writing Trainer running on "+host+":"+port));
