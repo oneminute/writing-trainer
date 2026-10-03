@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS practice_sessions (
  total_items INTEGER NOT NULL,
  correct_count INTEGER NOT NULL DEFAULT 0,
  first_try_correct INTEGER NOT NULL DEFAULT 0,
+ independent_correct INTEGER NOT NULL DEFAULT 0,
  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  completed_at TEXT,
@@ -157,6 +158,7 @@ CREATE TABLE IF NOT EXISTS practice_session_items (
  hint_level INTEGER NOT NULL DEFAULT 0,
  model_viewed INTEGER NOT NULL DEFAULT 0,
  first_try_correct INTEGER NOT NULL DEFAULT 0,
+ independent_correct INTEGER NOT NULL DEFAULT 0,
  last_feedback_json TEXT,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(session_id) REFERENCES practice_sessions(id) ON DELETE CASCADE,
@@ -165,6 +167,11 @@ CREATE TABLE IF NOT EXISTS practice_session_items (
 CREATE INDEX IF NOT EXISTS idx_practice_sessions_group ON practice_sessions(group_id, status, id DESC);
 CREATE INDEX IF NOT EXISTS idx_session_items_session ON practice_session_items(session_id, position);
 `);
+const practiceSessionCols=db.prepare("PRAGMA table_info(practice_sessions)").all().map(x=>x.name);
+if(!practiceSessionCols.includes("independent_correct")) db.exec("ALTER TABLE practice_sessions ADD COLUMN independent_correct INTEGER NOT NULL DEFAULT 0");
+const practiceSessionItemCols=db.prepare("PRAGMA table_info(practice_session_items)").all().map(x=>x.name);
+if(!practiceSessionItemCols.includes("independent_correct")) db.exec("ALTER TABLE practice_session_items ADD COLUMN independent_correct INTEGER NOT NULL DEFAULT 0");
+
 const groupCols=db.prepare("PRAGMA table_info(practice_groups)").all().map(x=>x.name);
 if(!groupCols.includes("favorite")) db.exec("ALTER TABLE practice_groups ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0");
 
@@ -515,6 +522,7 @@ function periodMetrics(days){
  const q=db.prepare(`SELECT COUNT(*) questions,
   SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) correct,
   SUM(CASE WHEN first_try_correct=1 THEN 1 ELSE 0 END) first_try,
+  SUM(CASE WHEN independent_correct=1 THEN 1 ELSE 0 END) independent,
   SUM(CASE WHEN hint_level>0 THEN 1 ELSE 0 END) hints,
   SUM(CASE WHEN model_viewed=1 THEN 1 ELSE 0 END) model_viewed
   FROM practice_session_items
@@ -533,6 +541,8 @@ function periodMetrics(days){
   finalCorrect:Number(q.correct||0),
   firstTryCorrect:Number(q.first_try||0),
   firstTryRate:questions?Math.round(Number(q.first_try||0)/questions*100):0,
+  independentCorrect:Number(q.independent||0),
+  independentRate:questions?Math.round(Number(q.independent||0)/questions*100):0,
   hintUsed:Number(q.hints||0),
   modelViewed:Number(q.model_viewed||0),
   sessions:Number(sessions.total||0),
@@ -562,7 +572,7 @@ app.get("/api/progress",(req,res)=>{
   FROM attempts a LEFT JOIN skill_attempts sa ON sa.attempt_id=a.id
   WHERE a.session_date>=date('now','-13 days')
   GROUP BY a.session_date ORDER BY a.session_date`).all();
- const recentSessions=db.prepare(`SELECT id,group_id,title,mode,status,total_items,correct_count,first_try_correct,started_at,completed_at
+ const recentSessions=db.prepare(`SELECT id,group_id,title,mode,status,total_items,correct_count,first_try_correct,independent_correct,started_at,completed_at
   FROM practice_sessions ORDER BY id DESC LIMIT 10`).all();
  res.json({
   mastery,stage,totals,sessions,errors,trend,recentSessions,
@@ -658,7 +668,7 @@ function createPracticeSession(groupId){
 function sessionPayload(id){
  const session=db.prepare("SELECT * FROM practice_sessions WHERE id=?").get(id);
  if(!session) return null;
- const items=db.prepare("SELECT position,exercise_json,answer,correct,completed,attempt_count,hint_level,model_viewed,first_try_correct,last_feedback_json FROM practice_session_items WHERE session_id=? ORDER BY position").all(id)
+ const items=db.prepare("SELECT position,exercise_json,answer,correct,completed,attempt_count,hint_level,model_viewed,first_try_correct,independent_correct,last_feedback_json FROM practice_session_items WHERE session_id=? ORDER BY position").all(id)
   .map(r=>({...r,exercise:JSON.parse(r.exercise_json),feedback:r.last_feedback_json?JSON.parse(r.last_feedback_json):null}));
  return {session,items};
 }
@@ -771,12 +781,13 @@ app.post("/api/check",async(req,res)=>{
   if(sessionItem){
    const newAttemptCount=previousAttempts+1;
    const firstTryCorrect=sessionItem.first_try_correct||(firstTry&&r.correct?1:0);
-   db.prepare("UPDATE practice_session_items SET answer=?,correct=?,completed=?,attempt_count=?,hint_level=?,model_viewed=?,first_try_correct=?,last_feedback_json=?,updated_at=CURRENT_TIMESTAMP WHERE session_id=? AND position=?")
-    .run(answer,(r.correct||sessionItem.correct)?1:0,r.correct?1:sessionItem.completed,newAttemptCount,Math.max(sessionItem.hint_level,Number(hintLevel)||0),sessionItem.model_viewed||(modelViewed?1:0),firstTryCorrect,JSON.stringify(r),Number(sessionId),Number(position));
-   const stats=db.prepare("SELECT COUNT(*) total,SUM(completed) completed,SUM(correct) correct,SUM(first_try_correct) first_try_correct FROM practice_session_items WHERE session_id=?").get(Number(sessionId));
+   const independentCorrect=sessionItem.independent_correct||(firstTry&&r.correct&&Number(hintLevel||0)===0&&!modelViewed?1:0);
+   db.prepare("UPDATE practice_session_items SET answer=?,correct=?,completed=?,attempt_count=?,hint_level=?,model_viewed=?,first_try_correct=?,independent_correct=?,last_feedback_json=?,updated_at=CURRENT_TIMESTAMP WHERE session_id=? AND position=?")
+    .run(answer,(r.correct||sessionItem.correct)?1:0,r.correct?1:sessionItem.completed,newAttemptCount,Math.max(sessionItem.hint_level,Number(hintLevel)||0),sessionItem.model_viewed||(modelViewed?1:0),firstTryCorrect,independentCorrect,JSON.stringify(r),Number(sessionId),Number(position));
+   const stats=db.prepare("SELECT COUNT(*) total,SUM(completed) completed,SUM(correct) correct,SUM(first_try_correct) first_try_correct,SUM(independent_correct) independent_correct FROM practice_session_items WHERE session_id=?").get(Number(sessionId));
    const done=Number(stats.completed||0)>=Number(stats.total||0);
-   db.prepare("UPDATE practice_sessions SET current_index=?,correct_count=?,first_try_correct=?,status=?,updated_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=?")
-    .run(Number(position),Number(stats.correct||0),Number(stats.first_try_correct||0),done?"completed":"in_progress",done?1:0,Number(sessionId));
+   db.prepare("UPDATE practice_sessions SET current_index=?,correct_count=?,first_try_correct=?,independent_correct=?,status=?,updated_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=?")
+    .run(Number(position),Number(stats.correct||0),Number(stats.first_try_correct||0),Number(stats.independent_correct||0),done?"completed":"in_progress",done?1:0,Number(sessionId));
   }
 
   const q=db.prepare("SELECT * FROM review_queue WHERE skill_id=?").get(skillId);
