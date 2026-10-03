@@ -474,20 +474,22 @@ document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{
 $("setsList").onclick=e=>{const b=e.target.closest("[data-set-action]");if(b)handleSetAction(b);};
 
 $("generateToday").onclick=async()=>{
+ const b=$("generateToday"),old=b.textContent;b.disabled=true;b.textContent="Generating locally...";$("dayMeta").textContent="Generating practice in small local-model batches. This can take a minute.";
  try{
   const d=await generate("today","",false);
   if(!d.groupId) throw new Error("Generated set was not saved.");
   await startGroupSession(d.groupId,{title:"Today's Practice",meta:"AI-generated & saved • "+d.exercises.length+" questions"});
- }catch(e){alert(e.message);}
+ }catch(e){alert("Could not generate practice: "+e.message);}finally{b.disabled=false;b.textContent=old;}
 };
 
 $("regenerateToday").onclick=async()=>{
  if(!confirm("Generate a new Today set? The current set will remain saved in Sets.")) return;
+ const b=$("regenerateToday"),old=b.textContent;b.disabled=true;b.textContent="Generating locally...";$("dayMeta").textContent="Regenerating in small local-model batches. This can take a minute.";
  try{
   const d=await generate("today","",true);
   if(!d.groupId) throw new Error("Generated set was not saved.");
   await startGroupSession(d.groupId,{title:"Today's Practice",meta:"New AI-generated set • saved permanently • "+d.exercises.length+" questions"});
- }catch(e){alert(e.message);}
+ }catch(e){alert("Could not regenerate practice: "+e.message);}finally{b.disabled=false;b.textContent=old;}
 };
 
 $("generateReview").onclick=async()=>{
