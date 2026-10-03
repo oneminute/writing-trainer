@@ -90,6 +90,13 @@ const cols = db.prepare("PRAGMA table_info(attempts)").all().map(x=>x.name);
 for (const [name,type] of [["skill_id","TEXT"],["exercise_type","TEXT"],["session_date","TEXT"]]) {
   if (!cols.includes(name)) db.exec(`ALTER TABLE attempts ADD COLUMN ${name} ${type}`);
 }
+db.exec(`CREATE TABLE IF NOT EXISTS generated_sets (
+ set_key TEXT PRIMARY KEY,
+ mode TEXT NOT NULL,
+ skill_id TEXT,
+ exercises_json TEXT NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`);
 db.exec("CREATE INDEX IF NOT EXISTS idx_skill_attempts_skill ON skill_attempts(skill_id, created_at)");
 db.exec("CREATE INDEX IF NOT EXISTS idx_attempts_date ON attempts(session_date, id)");
 
