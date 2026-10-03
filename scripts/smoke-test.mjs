@@ -52,6 +52,7 @@ try{
 
  const today=await json("/api/today");
  assert(Array.isArray(today.exercises)&&today.exercises.length===8,"Today should expose 8 starter exercises");
+ assert(today.exercises.every(q=>q.planMeta&&q.planMeta.stage&&q.planMeta.lessonTitle&&q.planMeta.skillName),"Every Today exercise should expose curriculum metadata");
  assert(today.groupId,"Today should have a saved practice group");
 
  const plan=await json("/api/plan");
@@ -72,6 +73,7 @@ try{
 
  const session=await json("/api/practice-groups/"+today.groupId+"/start",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
  assert(session.session&&session.items.length===8,"Session creation failed");
+ assert(session.items.every(x=>x.exercise.planMeta&&x.exercise.planMeta.lessonTitle),"Saved-session exercises should expose curriculum metadata");
 
  await json("/api/sessions/"+session.session.id+"/items/0",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({answer:"test draft",hintLevel:1})});
  const resumed=await json("/api/sessions/"+session.session.id);
