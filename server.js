@@ -422,6 +422,10 @@ importExistingGeneratedSets();
 
 function ensureBasePracticeGroup(count){
  const actual=Math.max(1,Math.min(Number(count)||BASE_EXERCISES.length,BASE_EXERCISES.length));
+ if(actual===BASE_EXERCISES.length){
+  const legacy=db.prepare("SELECT id FROM practice_groups WHERE archive_key='base:starter'").get();
+  if(legacy) return legacy.id;
+ }
  const archiveKey="base:starter:"+actual;
  const existing=db.prepare("SELECT id FROM practice_groups WHERE archive_key=?").get(archiveKey);
  if(existing) return existing.id;
