@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Writing Trainer</title><link rel="stylesheet" href="/styles.css"></head>
 <body><main class="shell">
 <header class="topbar"><div><div class="eyebrow">WRITING TRAINER</div><h1>Build real English writing.</h1></div><nav>
-<button class="tab active" data-view="today">Today</button><button class="tab" data-view="plan">Plan</button><button class="tab" data-view="review">Review</button><button class="tab" data-view="progress">Progress</button><button class="tab" data-view="history">History</button></nav></header>
+<button class="tab active" data-view="today">Today</button><button class="tab" data-view="plan">Plan</button><button class="tab" data-view="review">Review</button><button class="tab" data-view="progress">Progress</button><button class="tab" data-view="history">History</button><button class="tab" data-view="settings">Settings</button></nav></header>
 <section id="todayView" class="view">
 <div class="card hero"><div><h2 id="dayTitle">Today's Practice</h2><p id="dayMeta" class="muted"></p><div class="actions"><button id="generateToday" class="primary">Generate Today Practice</button><button id="regenerateToday">Regenerate</button></div></div><div class="progress-wrap"><div id="progressText"></div><div class="progress"><div id="progressBar"></div></div></div></div>
 <div class="card"><div class="question-top"><span id="type" class="pill"></span><span id="focus" class="pill"></span></div><h2 id="prompt"></h2><label>Write one complete English sentence:</label><textarea id="answer" spellcheck="true" placeholder="Type your sentence here..."></textarea>
@@ -13,4 +13,19 @@
 <section id="reviewView" class="view hidden"><div class="card"><h2>Review Queue</h2><p class="muted">Skills return after 1, 3, 7 and 14 days until they become stable.</p><div class="actions"><button id="generateReview" class="primary">Generate Due Review Practice</button></div><div id="reviewList"></div></div></section>
 <section id="progressView" class="view hidden"><div class="card"><h2>Writing Skill Map</h2><p id="stageText" class="muted"></p><div id="skillList"></div></div></section>
 <section id="historyView" class="view hidden"><div class="card"><h2>Practice History</h2><div id="historyList"></div></div></section>
+<section id="settingsView" class="view hidden">
+ <div class="card settings-card">
+  <h2>Settings</h2>
+  <p class="muted">These settings are saved on this computer and apply to all practice modes.</p>
+  <div class="setting-row">
+   <div>
+    <label for="practiceCount"><b>Exercises per practice</b></label>
+    <p class="muted setting-help">Used for Today, focused Skill Practice, and Review Practice. Range: 4–20.</p>
+   </div>
+   <input id="practiceCount" type="number" min="4" max="20" step="1" value="12">
+  </div>
+  <div class="actions"><button id="saveSettings" class="primary">Save Settings</button></div>
+  <div id="settingsStatus" class="notice hidden"></div>
+ </div>
+</section>
 </main><script src="/app.js"></script></body></html>
