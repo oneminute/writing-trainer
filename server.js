@@ -319,7 +319,7 @@ function buildSkillSequence(skills,count){
 }
 
 async function generateExercises(skills,count,mode,targetSequence=null){
- const allowed=[...new Set(skills.filter(x=>skillMap[x]))].slice(0,8);
+ const allowed=[...new Set(skills.filter(x=>skillMap[x]))];
  if(!allowed.length) throw new Error("No valid curriculum skills were selected");
  const format=exerciseSchemaFor(allowed,count,mode);
  const instructions=[
@@ -420,6 +420,17 @@ function importExistingGeneratedSets(){
 
 importExistingGeneratedSets();
 
+function ensureBasePracticeGroup(count){
+ const actual=Math.max(1,Math.min(Number(count)||BASE_EXERCISES.length,BASE_EXERCISES.length));
+ const archiveKey="base:starter:"+actual;
+ const existing=db.prepare("SELECT id FROM practice_groups WHERE archive_key=?").get(archiveKey);
+ if(existing) return existing.id;
+ return archivePracticeGroup("today",null,BASE_EXERCISES.slice(0,actual),{
+  archiveKey,
+  title:"Starter Practice · "+actual+" questions"
+ });
+}
+
 app.get("/api/settings",(req,res)=>{
  res.json({practiceCount:getPracticeCount(),minPracticeCount:4,maxPracticeCount:20});
 });
@@ -479,8 +490,7 @@ app.get("/api/today",(req,res)=>{
  const allowed=[...new Set(sequence)];
  let generated=false,groupId=null;
  let exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
- const baseGroup=db.prepare("SELECT id FROM practice_groups WHERE archive_key='base:starter'").get();
- groupId=baseGroup?.id||null;
+ groupId=ensureBasePracticeGroup(exercises.length);
  const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get("today:"+date);
  if(cached){
   const parsed=JSON.parse(cached.exercises_json);
@@ -650,7 +660,7 @@ app.post("/api/check",async(req,res)=>{
    const newAttemptCount=previousAttempts+1;
    const firstTryCorrect=sessionItem.first_try_correct||(firstTry&&r.correct?1:0);
    db.prepare("UPDATE practice_session_items SET answer=?,correct=?,completed=?,attempt_count=?,hint_level=?,model_viewed=?,first_try_correct=?,last_feedback_json=?,updated_at=CURRENT_TIMESTAMP WHERE session_id=? AND position=?")
-    .run(answer,r.correct?1:0,r.correct?1:sessionItem.completed,newAttemptCount,Math.max(sessionItem.hint_level,Number(hintLevel)||0),sessionItem.model_viewed||(modelViewed?1:0),firstTryCorrect,JSON.stringify(r),Number(sessionId),Number(position));
+    .run(answer,(r.correct||sessionItem.correct)?1:0,r.correct?1:sessionItem.completed,newAttemptCount,Math.max(sessionItem.hint_level,Number(hintLevel)||0),sessionItem.model_viewed||(modelViewed?1:0),firstTryCorrect,JSON.stringify(r),Number(sessionId),Number(position));
    const stats=db.prepare("SELECT COUNT(*) total,SUM(completed) completed,SUM(correct) correct,SUM(first_try_correct) first_try_correct FROM practice_session_items WHERE session_id=?").get(Number(sessionId));
    const done=Number(stats.completed||0)>=Number(stats.total||0);
    db.prepare("UPDATE practice_sessions SET current_index=?,correct_count=?,first_try_correct=?,status=?,updated_at=CURRENT_TIMESTAMP,completed_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id=?")
