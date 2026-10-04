@@ -11,7 +11,7 @@
 - [x] pull-request template
 - [x] promotion copy
 - [x] demo capture plan
-- [ ] choose and add LICENSE
+- [x] Apache-2.0 LICENSE added
 - [ ] set repository description
 - [ ] add GitHub topics
 - [ ] add social preview image
