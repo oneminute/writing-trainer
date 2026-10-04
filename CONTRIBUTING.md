@@ -142,6 +142,8 @@ AI-assisted code is welcome, but contributors remain responsible for:
 - curriculum quality
 - avoiding fabricated APIs or assumptions
 
-## License note
+## License
 
-The repository does not yet have a finalized license. Please do not assume contribution or redistribution terms until a license is added.
+Writing Trainer is licensed under the Apache License 2.0.
+
+Unless you explicitly state otherwise, contributions intentionally submitted for inclusion in the project are provided under the same Apache-2.0 terms, consistent with the license's contribution provisions.
