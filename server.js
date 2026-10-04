@@ -332,7 +332,7 @@ const schema={type:"object",additionalProperties:false,properties:{
 const ERROR_TAGS=[
  "none","subject_verb_agreement","verb_tense","auxiliary_base_form","article","preposition",
  "pronoun","singular_plural","word_order","clause_structure","capitalization","punctuation",
- "vocabulary","meaning","assisted_success","other"
+ "vocabulary","meaning","incomplete_sentence","assisted_success","other"
 ];
 
 function normalizeErrorTag(tag,result){
@@ -347,7 +347,7 @@ function normalizeErrorTag(tag,result){
   plural:"singular_plural",singular_plural:"singular_plural",
   word_order:"word_order",clause:"clause_structure",clause_structure:"clause_structure",
   capitalization:"capitalization",punctuation:"punctuation",vocabulary:"vocabulary",
-  meaning:"meaning",semantic:"meaning",none:"none"
+  meaning:"meaning",semantic:"meaning",incomplete_sentence:"incomplete_sentence",fragment:"incomplete_sentence",none:"none"
  };
  return map[raw] ? map[raw] : (ERROR_TAGS.includes(raw) ? raw : "other");
 }
@@ -1201,6 +1201,39 @@ app.post("/api/state",(req,res)=>{
  res.json({ok:true});
 });
 
+function englishWordTokens(text){
+ return String(text||"").match(/[A-Za-z]+(?:['’][A-Za-z]+)*/g)||[];
+}
+
+function precheckStudentAnswer(answer,modelAnswer,lesson){
+ const text=String(answer||"").trim();
+ const words=englishWordTokens(text);
+ const modelWords=englishWordTokens(modelAnswer||"");
+ const stage=Number(lesson?.stage||1);
+ const expectedMin=stage>=10?Math.max(4,Math.min(12,Math.ceil(modelWords.length*.35))):Math.max(2,Math.min(5,Math.ceil(modelWords.length*.45)));
+ const letterCount=(text.match(/[A-Za-z]/g)||[]).length;
+ const modelLetterCount=(String(modelAnswer||"").match(/[A-Za-z]/g)||[]).length;
+ const tooShortByWords=words.length<expectedMin;
+ const tooShortByContent=modelLetterCount>=12&&letterCount<Math.max(4,Math.floor(modelLetterCount*.22));
+ if(!text||words.length===0||tooShortByWords||tooShortByContent){
+  return {
+   correct:false,
+   meaning:"needs_work",
+   grammar:"needs_work",
+   tense:"not_applicable",
+   capitalization:"needs_work",
+   punctuation:"needs_work",
+   feedback:"This is not a complete answer to the prompt yet.",
+   suggestion:"Write a complete English sentence before checking. Aim for at least "+expectedMin+" meaningful English words for this exercise.",
+   betterSentence:"",
+   skillSuccess:false,
+   errorTag:"incomplete_sentence",
+   deterministicPrecheck:true
+  };
+ }
+ return null;
+}
+
 app.post("/api/check",async(req,res)=>{
  try{
   const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,lessonId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
@@ -1216,7 +1249,8 @@ app.post("/api/check",async(req,res)=>{
   const lessonErrors=resolvedLesson?parseJsonArray(resolvedLesson.common_errors_json).join(" | "):"";
   const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill and assigned curriculum lesson separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly. Follow the deterministic curriculum rule rather than inventing a new target.";
   const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nCurriculum lesson: "+(resolvedLesson?.title||resolvedLessonId||"legacy")+"\nLesson objective: "+(resolvedLesson?.objective||"")+"\nLesson rules: "+lessonRules+"\nCommon target errors: "+lessonErrors+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
-  const r=await runWritingCheck(input,instructions);
+  const precheck=precheckStudentAnswer(answer,modelAnswer,resolvedLesson);
+  const r=precheck||await runWritingCheck(input,instructions);
   r.errorTag=normalizeErrorTag(r.errorTag,r);
   let evidence=0;
   if(r.skillSuccess){
