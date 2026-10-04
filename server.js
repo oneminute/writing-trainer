@@ -500,8 +500,11 @@ function recentHistoricalPrompts(skillIds,limit=40){
  return out;
 }
 
-function hasPracticeHistory(){
- return Boolean(db.prepare("SELECT 1 FROM attempts LIMIT 1").get()||db.prepare("SELECT 1 FROM practice_sessions WHERE status='completed' LIMIT 1").get());
+function hasPriorPracticeHistory(date=today()){
+ return Boolean(
+  db.prepare("SELECT 1 FROM attempts WHERE COALESCE(session_date,date(created_at,'localtime'))<? LIMIT 1").get(date)||
+  db.prepare("SELECT 1 FROM practice_sessions WHERE status='completed' AND date(started_at,'localtime')<? LIMIT 1").get(date)
+ );
 }
 
 function validateGeneratedExercises(exercises,allowed,count,mode){
@@ -887,7 +890,7 @@ app.get("/api/today",(req,res)=>{
   else{db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);console.warn("Discarded invalid today cache:",problem);}
  }
  if(!generated){
-  if(hasPracticeHistory()){
+  if(hasPriorPracticeHistory(date)){
    needsGeneration=true;
   }else{
    exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
