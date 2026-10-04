@@ -12,7 +12,13 @@ import { BASE_EXERCISES } from "./src/exercises.js";
 const app = express();
 const port = process.env.PORT || 5178;
 const llmProvider = (process.env.LLM_PROVIDER || "ollama").toLowerCase();
-const ollamaBaseUrl = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+const configuredOllamaBaseUrl = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:12000").replace(/\/$/, "");
+const ollamaCandidateUrls = [...new Set([
+ configuredOllamaBaseUrl,
+ "http://127.0.0.1:12000",
+ "http://127.0.0.1:11434"
+].filter(Boolean).map(x=>String(x).replace(/\/$/,"")))];
+let activeOllamaBaseUrl = null;
 const ollamaModel = process.env.OLLAMA_WRITING_MODEL || "hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL";
 const ollamaTimeoutMs = Number(process.env.OLLAMA_WRITING_TIMEOUT_SECONDS || 60) * 1000;
 const ollamaGenerationTimeoutMs = Number(process.env.OLLAMA_GENERATION_TIMEOUT_SECONDS || 180) * 1000;
@@ -20,26 +26,68 @@ const ollamaGenerationBatchSize = Math.max(1,Math.min(6,Number(process.env.OLLAM
 const openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna";
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 
+function ollamaCandidateOrder(){
+ return activeOllamaBaseUrl
+  ? [activeOllamaBaseUrl,...ollamaCandidateUrls.filter(x=>x!==activeOllamaBaseUrl)]
+  : ollamaCandidateUrls;
+}
+
+async function requestOllamaJson(pathname,{method="GET",body=null,timeoutMs=5000}={}){
+ const errors=[];
+ for(const base of ollamaCandidateOrder()){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+   const response=await fetch(base+pathname,{
+    method,
+    headers:body==null?undefined:{"Content-Type":"application/json"},
+    body:body==null?undefined:JSON.stringify(body),
+    signal:controller.signal
+   });
+   if(!response.ok){
+    let detail="";
+    try{detail=(await response.text()).slice(0,240);}catch{}
+    errors.push(base+": HTTP "+response.status+(detail?" "+detail:""));
+    continue;
+   }
+   const data=await response.json();
+   if(activeOllamaBaseUrl!==base){
+    activeOllamaBaseUrl=base;
+    console.log("[Ollama] Connected to "+base);
+   }
+   return {data,base};
+  }catch(e){
+   if(e?.name==="AbortError"){
+    const message="Ollama request timed out after "+Math.round(timeoutMs/1000)+" seconds at "+base;
+    if(activeOllamaBaseUrl===base) throw new Error(message);
+    errors.push(message);
+    continue;
+   }
+   const detail=e?.cause?.code||e?.cause?.message||e?.message||String(e);
+   errors.push(base+": "+detail);
+  }finally{
+   clearTimeout(timer);
+  }
+ }
+ throw new Error(
+  "Could not connect to Ollama. Tried: "+ollamaCandidateUrls.join(", ")+
+  ". Start Ollama in PowerShell with: $env:OLLAMA_HOST=\"127.0.0.1:12000\"; ollama serve"+
+  (errors.length?". Details: "+errors.join(" | "):"")
+ );
+}
+
 async function checkWithOllama(input, instructions) {
- const controller = new AbortController();
- const timer = setTimeout(() => controller.abort(), ollamaTimeoutMs);
- try {
-  const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
-   method:"POST", headers:{"Content-Type":"application/json"}, signal:controller.signal,
-   body:JSON.stringify({
-    model:ollamaModel, stream:false, think:false, keep_alive:"10m",
-    format:schema,
-    options:{temperature:0},
-    messages:[
-     {role:"system",content:instructions + " Return ONLY valid JSON matching the requested fields."},
-     {role:"user",content:input}
-    ]
-   })
-  });
-  if(!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
-  const data=await response.json();
-  return {...JSON.parse(data.message?.content || "{}"), provider:`ollama:${ollamaModel}`};
- } finally { clearTimeout(timer); }
+ const payload={
+  model:ollamaModel, stream:false, think:false, keep_alive:"10m",
+  format:schema,
+  options:{temperature:0},
+  messages:[
+   {role:"system",content:instructions + " Return ONLY valid JSON matching the requested fields."},
+   {role:"user",content:input}
+  ]
+ };
+ const {data,base}=await requestOllamaJson("/api/chat",{method:"POST",body:payload,timeoutMs:ollamaTimeoutMs});
+ return {...JSON.parse(data.message?.content || "{}"), provider:"ollama:"+ollamaModel+"@"+base};
 }
 
 async function checkWithOpenAI(input, instructions) {
@@ -614,29 +662,22 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    (forbidden.length?"\nFORBIDDEN PREVIOUS PROMPTS — do not reuse these sentences, and do not make cosmetic-only rewrites of them: "+forbidden.join(" | "):"")+
    "\nUse a genuinely new subject, situation, object, time, place, or detail while testing the same grammar target."+
    retryNote;
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),ollamaGenerationTimeoutMs);
   try{
-   const response=await fetch(ollamaBaseUrl+"/api/chat",{
+   const {data}=await requestOllamaJson("/api/chat",{
     method:"POST",
-    headers:{"Content-Type":"application/json"},
-    signal:controller.signal,
-    body:JSON.stringify({
+    timeoutMs:ollamaGenerationTimeoutMs,
+    body:{
      model:ollamaModel,stream:false,think:false,keep_alive:"10m",format,
      options:{temperature:0},
      messages:[{role:"system",content:instructions},{role:"user",content:input}]
-    })
+    }
    });
-   if(!response.ok) throw new Error("Ollama HTTP "+response.status);
-   const data=await response.json();
    return JSON.parse(data.message?.content||"{}").exercises;
   }catch(e){
-   if(e?.name==="AbortError"){
-    throw new Error("Ollama generation timed out after "+Math.round(ollamaGenerationTimeoutMs/1000)+" seconds for a "+batchCount+"-question batch. The local model may still be loading or running slowly.");
+   if(String(e?.message||"").includes("timed out")){
+    throw new Error("Ollama generation timed out after "+Math.round(ollamaGenerationTimeoutMs/1000)+" seconds for a "+batchCount+"-question batch. "+e.message);
    }
    throw e;
-  }finally{
-   clearTimeout(timer);
   }
  }
 
@@ -1213,9 +1254,21 @@ app.post("/api/check",async(req,res)=>{
 });
 
 app.get("/api/health",async(req,res)=>{
- let ollamaAvailable=false;
- try{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),1500);const r=await fetch(ollamaBaseUrl+"/api/tags",{signal:controller.signal});clearTimeout(timer);ollamaAvailable=r.ok;}catch{}
- res.json({llm_provider:llmProvider,ollama_available:ollamaAvailable,ollama_base_url:ollamaBaseUrl,ollama_writing_model:ollamaModel,ollama_check_timeout_seconds:Math.round(ollamaTimeoutMs/1000),ollama_generation_timeout_seconds:Math.round(ollamaGenerationTimeoutMs/1000),ollama_generation_batch_size:ollamaGenerationBatchSize,openai_enabled:Boolean(client),openai_model:openaiModel});
+ let ollamaAvailable=false,ollamaError="";
+ try{await requestOllamaJson("/api/tags",{timeoutMs:1500});ollamaAvailable=true;}catch(e){ollamaError=e?.message||String(e);}
+ res.json({
+  llm_provider:llmProvider,
+  ollama_available:ollamaAvailable,
+  ollama_base_url:activeOllamaBaseUrl||configuredOllamaBaseUrl,
+  ollama_candidates:ollamaCandidateUrls,
+  ollama_error:ollamaError,
+  ollama_writing_model:ollamaModel,
+  ollama_check_timeout_seconds:Math.round(ollamaTimeoutMs/1000),
+  ollama_generation_timeout_seconds:Math.round(ollamaGenerationTimeoutMs/1000),
+  ollama_generation_batch_size:ollamaGenerationBatchSize,
+  openai_enabled:Boolean(client),
+  openai_model:openaiModel
+ });
 });
 
 app.post("/api/complete-day",(req,res)=>{
@@ -1232,4 +1285,14 @@ app.use((err,req,res,next)=>{
 });
 
 const host=process.env.HOST||"127.0.0.1";
-app.listen(port,host,()=>console.log("Writing Trainer running on "+host+":"+port));
+app.listen(port,host,async()=>{
+ console.log("Writing Trainer running on "+host+":"+port);
+ if(llmProvider==="ollama"||llmProvider==="auto"){
+  try{
+   const {base}=await requestOllamaJson("/api/tags",{timeoutMs:1200});
+   console.log("[Ollama] Ready at "+base+" using model "+ollamaModel);
+  }catch(e){
+   console.warn("[Ollama] Not reachable yet. "+e.message);
+  }
+ }
+});
