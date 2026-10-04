@@ -464,6 +464,46 @@ function containsChinese(text){
  return /[\u3400-\u4dbf\u4e00-\u9fff]/u.test(String(text||""));
 }
 
+function normalizePromptKey(text){
+ return String(text||"")
+  .normalize("NFKC")
+  .toLowerCase()
+  .replace(/[\p{P}\p{S}\s]+/gu,"")
+  .trim();
+}
+
+function allHistoricalPromptKeys(){
+ const keys=new Set();
+ for(const r of db.prepare("SELECT prompt FROM practice_group_items WHERE prompt IS NOT NULL AND prompt!=''").all()) keys.add(normalizePromptKey(r.prompt));
+ for(const r of db.prepare("SELECT prompt FROM attempts WHERE prompt IS NOT NULL AND prompt!=''").all()) keys.add(normalizePromptKey(r.prompt));
+ keys.delete("");
+ return keys;
+}
+
+function recentHistoricalPrompts(skillIds,limit=40){
+ const ids=[...new Set((skillIds||[]).filter(Boolean))];
+ const rows=[];
+ if(ids.length){
+  const placeholders=ids.map(()=>"?").join(",");
+  rows.push(...db.prepare("SELECT prompt FROM practice_group_items WHERE skill_id IN ("+placeholders+") AND prompt IS NOT NULL AND prompt!='' ORDER BY id DESC LIMIT ?").all(...ids,limit));
+  rows.push(...db.prepare("SELECT prompt FROM attempts WHERE skill_id IN ("+placeholders+") AND prompt IS NOT NULL AND prompt!='' ORDER BY id DESC LIMIT ?").all(...ids,limit));
+ }else{
+  rows.push(...db.prepare("SELECT prompt FROM practice_group_items WHERE prompt IS NOT NULL AND prompt!='' ORDER BY id DESC LIMIT ?").all(limit));
+ }
+ const seen=new Set(),out=[];
+ for(const r of rows){
+  const key=normalizePromptKey(r.prompt);
+  if(!key||seen.has(key)) continue;
+  seen.add(key);out.push(String(r.prompt));
+  if(out.length>=limit) break;
+ }
+ return out;
+}
+
+function hasPracticeHistory(){
+ return Boolean(db.prepare("SELECT 1 FROM attempts LIMIT 1").get()||db.prepare("SELECT 1 FROM practice_sessions WHERE status='completed' LIMIT 1").get());
+}
+
 function validateGeneratedExercises(exercises,allowed,count,mode){
  if(!Array.isArray(exercises)) return "exercises is not an array";
  if(exercises.length!==count) return "expected "+count+" exercises, got "+exercises.length;
@@ -472,7 +512,7 @@ function validateGeneratedExercises(exercises,allowed,count,mode){
   const q=exercises[i]||{};
   if(!allowed.includes(q.skill)) return "exercise "+(i+1)+" used disallowed skill: "+q.skill;
   if(q.type!==mode) return "exercise "+(i+1)+" has wrong type: "+q.type;
-  if(!containsChinese(q.prompt)) return "exercise "+(i+1)+" prompt is not Chinese: "+q.prompt;
+  if(!String(q.prompt||"").trim()) return "exercise "+(i+1)+" has an empty prompt";
   if(!String(q.model||"").trim()) return "exercise "+(i+1)+" has no model answer";
   if(!Array.isArray(q.hints)||q.hints.length!==3) return "exercise "+(i+1)+" must have exactly 3 hints";
   const key=String(q.prompt).trim();
@@ -523,6 +563,7 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
  const sequence=Array.isArray(targetSequence)&&targetSequence.length===count?targetSequence:buildSkillSequence(allowed,count);
  const lessonSequence=chooseLessonSequence(sequence,maxStage,forcedLessonId);
  if(lessonSequence.some(x=>!x)) throw new Error("No curriculum lesson guidance exists for one or more selected skills");
+ const historicalPromptKeys=allHistoricalPromptKeys();
  const instructions=[
   "Create English writing exercises for an 11-year-old sixth-grade ESL student.",
   "Prompt language MUST follow the assigned curriculum stage. Stages 1-9 use Simplified Chinese; Stage 10 may use a short Chinese or English situation; Stages 11-12 use English-first school-style prompts.",
@@ -562,10 +603,13 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    "expected output="+(s?.sentence_mode||""),
    "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
   ].join("; ")}).join("\n");
+  const historyPrompts=recentHistoricalPrompts(batchAllowed,40);
+  const forbidden=[...new Set([...historyPrompts,...priorPrompts])];
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
    ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
-   (priorPrompts.length?"\nDo not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   (forbidden.length?"\nFORBIDDEN PREVIOUS PROMPTS — do not reuse these sentences, and do not make cosmetic-only rewrites of them: "+forbidden.join(" | "):"")+
+   "\nUse a genuinely new subject, situation, object, time, place, or detail while testing the same grammar target."+
    retryNote;
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),ollamaGenerationTimeoutMs);
@@ -609,10 +653,13 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    "expected output="+(s?.sentence_mode||""),
    "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
   ].join("; ")}).join("\n");
+  const historyPrompts=recentHistoricalPrompts(batchAllowed,40);
+  const forbidden=[...new Set([...historyPrompts,...priorPrompts])];
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
    ". Exact item-by-item curriculum guidance follows. You MUST obey it:\n"+guidance+
-   (priorPrompts.length?"\nDo not repeat any of these earlier prompts: "+priorPrompts.join(" | "):"")+
+   (forbidden.length?"\nFORBIDDEN PREVIOUS PROMPTS — do not reuse these sentences, and do not make cosmetic-only rewrites of them: "+forbidden.join(" | "):"")+
+   "\nUse a genuinely new subject, situation, object, time, place, or detail while testing the same grammar target."+
    retryNote;
   const r=await client.responses.create({
    model:openaiModel,reasoning:{effort:"none"},
@@ -656,8 +703,14 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
       }
       const languageProblem=promptLanguageProblem(batch[i]?.prompt,assignedLesson);
       if(languageProblem){problem="exercise "+(i+1)+" "+languageProblem;break;}
-      if(priorPrompts.includes(String(batch[i]?.prompt||"").trim())){
-       problem="prompt duplicates an earlier batch: "+batch[i]?.prompt;
+      const generatedPrompt=String(batch[i]?.prompt||"").trim();
+      const generatedKey=normalizePromptKey(generatedPrompt);
+      if(priorPrompts.some(p=>normalizePromptKey(p)===generatedKey)){
+       problem="prompt duplicates an earlier batch: "+generatedPrompt;
+       break;
+      }
+      if(historicalPromptKeys.has(generatedKey)){
+       problem="prompt was already used in an earlier saved practice set: "+generatedPrompt;
        break;
       }
      }
@@ -692,6 +745,10 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    }
    if(all[i]?.lessonId!==lessonSequence[i]?.id){
     problem="exercise "+(i+1)+" must use lessonId "+lessonSequence[i]?.id+", got "+all[i]?.lessonId;
+    break;
+   }
+   if(historicalPromptKeys.has(normalizePromptKey(all[i]?.prompt))){
+    problem="exercise "+(i+1)+" repeats a prompt from saved practice history: "+all[i]?.prompt;
     break;
    }
   }
@@ -820,9 +877,8 @@ app.get("/api/today",(req,res)=>{
  const practiceCount=getPracticeCount();
  const due=db.prepare("SELECT * FROM review_queue WHERE due_date<=? ORDER BY due_date LIMIT 4").all(date);
  const sequence=buildTodaySkillSequence(mastery,stage,date,practiceCount);
- let generated=false,groupId=null;
- let exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
- groupId=ensureBasePracticeGroup(exercises.length);
+ let generated=false,groupId=null,needsGeneration=false;
+ let exercises=[];
  const cached=db.prepare("SELECT exercises_json,group_id FROM generated_sets WHERE set_key=?").get("today:"+date);
  if(cached){
   const parsed=JSON.parse(cached.exercises_json);
@@ -830,7 +886,15 @@ app.get("/api/today",(req,res)=>{
   if(!problem){exercises=parsed;generated=true;groupId=cached.group_id||null;}
   else{db.prepare("DELETE FROM generated_sets WHERE set_key=?").run("today:"+date);console.warn("Discarded invalid today cache:",problem);}
  }
- res.json({date,stage,practiceCount,groupId,exercises:decorateExerciseList(exercises,stage),dueReviews:due,mastery,generated});
+ if(!generated){
+  if(hasPracticeHistory()){
+   needsGeneration=true;
+  }else{
+   exercises=BASE_EXERCISES.slice(0,Math.min(practiceCount,BASE_EXERCISES.length));
+   groupId=ensureBasePracticeGroup(exercises.length);
+  }
+ }
+ res.json({date,stage,practiceCount,groupId,exercises:decorateExerciseList(exercises,stage),dueReviews:due,mastery,generated,needsGeneration});
 });
 
 function periodMetrics(days){
