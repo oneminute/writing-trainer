@@ -84,6 +84,29 @@ try{
  const active=await json("/api/practice-groups/"+today.groupId+"/active-session");
  assert(active.session&&active.session.id===session.session.id,"Active session resume lookup failed");
 
+ const q=session.items[1].exercise;
+ const shortCheck=await json("/api/check",{
+  method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({
+   exerciseId:q.id,
+   prompt:q.prompt,
+   answer:"ki",
+   grammarFocus:q.focus,
+   modelAnswer:q.model,
+   skillId:q.skill,
+   lessonId:q.lessonId||"",
+   exerciseType:q.type,
+   sessionId:session.session.id,
+   position:1,
+   hintLevel:0,
+   modelViewed:false
+  })
+ });
+ assert(shortCheck.correct===false,"Nonsense short answer must be rejected before AI grading");
+ assert(shortCheck.deterministicPrecheck===true,"Short-answer rejection should come from deterministic precheck");
+ assert(shortCheck.errorTag==="incomplete_sentence","Short-answer error tag should be incomplete_sentence");
+
  const testDb=new Database(path.join(tmp,"writing-trainer.db"));
  const yesterday=new Date(Date.now()-86400000).toLocaleDateString("en-CA");
  testDb.prepare("INSERT INTO attempts(exercise_id,prompt,answer,correct,session_date) VALUES(?,?,?,?,?)").run("smoke-old","我通常在放学后做作业。","I usually do my homework after school.",1,yesterday);
@@ -92,7 +115,7 @@ try{
  assert(laterToday.needsGeneration===true,"Old starter set should be replaced on later practice days");
  assert(Array.isArray(laterToday.exercises)&&laterToday.exercises.length===0,"Later Today should not silently reload the starter set");
 
- console.log("Smoke test passed: settings, detailed curriculum plan, today, progress, history, sets, session persistence.");
+ console.log("Smoke test passed: settings, curriculum, deterministic short-answer rejection, today, progress, history, sets, session persistence.");
 } finally {
  child.kill();
  await new Promise(r=>setTimeout(r,100));
