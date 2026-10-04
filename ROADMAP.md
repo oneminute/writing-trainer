@@ -22,7 +22,7 @@ Writing Trainer is a pre-1.0 project. The roadmap prioritizes learning reliabili
 - [ ] Add better user-visible model connection diagnostics
 - [ ] Add import/export / backup for learning data
 - [ ] Add database migration versioning
-- [ ] Decide and add a repository license
+- [x] License repository under Apache-2.0
 - [ ] Capture polished screenshots and short demo GIF
 
 ## Next — writing progression
@@ -96,7 +96,7 @@ The most important product goal is moving beyond one-sentence translation.
 - [x] Public roadmap
 - [x] Promotion copy
 - [ ] Add repository description and topics
-- [ ] Add license
+- [x] Add Apache-2.0 license
 - [ ] Record 30–60 second demo
 - [ ] Publish first tagged release
 - [ ] Show HN post
