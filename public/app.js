@@ -157,11 +157,34 @@ async function loadToday(){
  currentSessionId=null;
  currentPracticeMode="today";
  sessionItems=[];
- exercises=d.exercises;
+ exercises=d.exercises||[];
  index=0;
  correctToday=new Set();
  $("dayTitle").textContent="Today's Practice";
- $("dayMeta").textContent="Stage "+d.stage+" • "+d.date+" • "+exercises.length+" exercises • "+(d.generated?"AI-generated & saved":"starter set");
+
+ if(d.needsGeneration){
+  $("dayMeta").textContent="Stage "+d.stage+" • "+d.date+" • preparing a new daily set from your saved learning history";
+  $("prompt").textContent="Generating new practice… Previously completed starter sentences will not be reused.";
+  $("lessonContext").innerHTML="";
+  $("progressText").textContent="";
+  $("score").textContent="";
+  $("generateToday").disabled=true;
+  $("regenerateToday").disabled=true;
+  try{
+   const generated=await generate("today","",false);
+   if(!generated.groupId) throw new Error("Generated set was not saved.");
+   await startGroupSession(generated.groupId,{title:"Today's Practice",meta:"New daily set • "+generated.exercises.length+" questions • historical prompts excluded"});
+  }catch(e){
+   $("prompt").textContent="Could not generate a new daily set: "+e.message;
+   $("dayMeta").textContent="No old starter questions were loaded. You can try Generate Today Practice again.";
+  }finally{
+   $("generateToday").disabled=false;
+   $("regenerateToday").disabled=false;
+  }
+  return;
+ }
+
+ $("dayMeta").textContent="Stage "+d.stage+" • "+d.date+" • "+exercises.length+" exercises • "+(d.generated?"AI-generated & saved":"first-time starter set");
  if(currentGroupId){
   try{
    const active=await get("/api/practice-groups/"+currentGroupId+"/active-session");
