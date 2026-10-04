@@ -389,6 +389,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-A repository license has **not yet been selected**.
+Writing Trainer is licensed under the **Apache License 2.0**.
 
-Until a license is added, the source is publicly viewable on GitHub but should not be described as an OSI-licensed open-source project. A license decision is listed in the roadmap before broader distribution.
+Apache-2.0 is a permissive open-source license that allows use, modification, redistribution, and commercial use subject to its terms, and it includes an explicit patent license.
+
+See [LICENSE](LICENSE).
