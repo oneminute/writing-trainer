@@ -1,5 +1,7 @@
 # Writing Trainer
 
+![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
+
 > A local-first, adaptive English writing trainer for ESL learners — with a deterministic curriculum, AI-generated practice, rubric-based grading, spaced review, and persistent learning history.
 
 Writing Trainer is designed around one core idea:
