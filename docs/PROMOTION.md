@@ -86,7 +86,7 @@ I'm especially interested in feedback on:
 3. grading reliability with small local models
 4. how to transition from translation support to independent writing
 
-Note: the repository does not yet have a finalized license, so I'm currently treating this as a public-source pre-release rather than claiming a formal open-source license.
+Writing Trainer is open source under the Apache License 2.0.
 
 ## Reddit — Local LLM / Ollama audience
 
@@ -284,7 +284,7 @@ https://github.com/oneminute/writing-trainer
 
 Before posting broadly:
 
-- [ ] choose and add a license
+- [x] Apache-2.0 license added
 - [ ] add repository description
 - [ ] add GitHub topics
 - [ ] capture Today screenshot
