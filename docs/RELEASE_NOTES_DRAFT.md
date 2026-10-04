@@ -107,7 +107,7 @@ See the README Quick Start section.
 
 - pre-1.0 UX
 - Windows-first launch workflow
-- no finalized repository license yet
+- Apache-2.0 licensed open-source project
 - curriculum currently optimized for a middle-school ESL learner
 - local model quality varies by hardware and model
 - paragraph and school-style writing modes are still being expanded
@@ -125,7 +125,7 @@ Especially useful feedback includes:
 
 ## Before publishing this release
 
-- [ ] choose and add LICENSE
+- [x] Apache-2.0 LICENSE added
 - [ ] verify fresh clone on a clean Windows environment
 - [ ] capture 4 polished screenshots
 - [ ] verify no private learner data or credentials are included
