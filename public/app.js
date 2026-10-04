@@ -9,6 +9,7 @@ let currentSessionId=null;
 let sessionItems=[];
 let currentPracticeMode="today";
 let answerSaveTimer=null;
+let questionEpoch=0;
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -59,8 +60,22 @@ function showFeedback(d){
   (d.evidenceScore===undefined?"":'<p class="muted"><b>Mastery evidence:</b> '+Math.round(d.evidenceScore*100)+'%</p>');
 }
 
+function resetQuestionPanels(){
+ clearTimeout(answerSaveTimer);
+ answerSaveTimer=null;
+ questionEpoch++;
+ $("result").className="result hidden";
+ $("result").innerHTML="";
+ $("hint").className="notice hint hidden";
+ $("hint").innerHTML="";
+ $("model").className="notice model hidden";
+ $("model").innerHTML="";
+ $("loading").classList.add("hidden");
+}
+
 function render(){
  if(!exercises.length) return;
+ resetQuestionPanels();
  index=Math.max(0,Math.min(index,exercises.length-1));
  const q=exercises[index];
  const state=sessionItemAt(index);
@@ -82,9 +97,6 @@ function render(){
  $("answer").value=state?.answer||"";
  hintLevel=state?.hint_level||0;
  modelViewed=Boolean(state?.model_viewed);
- $("result").className="result hidden";
- $("hint").className="notice hint hidden";
- $("model").className="notice model hidden";
  if(state?.feedback) showFeedback(state.feedback);
  if(hintLevel>0){
   $("hint").classList.remove("hidden");
@@ -279,20 +291,30 @@ async function startSkill(id){
 
 async function check(){
  const answer=$("answer").value.trim();
- if(!answer) return;
+ if(!answer){
+  $("result").className="result bad";
+  $("result").innerHTML='<strong>Type your answer first.</strong><p>Write a complete English sentence, then press Enter to check it.</p>';
+  $("answer").focus();
+  return;
+ }
  const q=exercises[index];
+ const checkIndex=index;
+ const checkExerciseId=q.id;
+ const epoch=questionEpoch;
  $("loading").classList.remove("hidden");
  $("checkBtn").disabled=true;
  try{
+  clearTimeout(answerSaveTimer);
+  answerSaveTimer=null;
   await ensureSession();
-  const state=sessionItemAt(index);
+  const state=sessionItems[checkIndex];
   const r=await fetch("/api/check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
    exerciseId:q.id,prompt:q.prompt,answer,grammarFocus:q.focus,modelAnswer:q.model,skillId:q.skill,lessonId:q.lessonId||"",exerciseType:q.type,
-   sessionId:currentSessionId,position:index,hintLevel:state?.hint_level||hintLevel,modelViewed:Boolean(state?.model_viewed||modelViewed)
+   sessionId:currentSessionId,position:checkIndex,hintLevel:state?.hint_level||0,modelViewed:Boolean(state?.model_viewed)
   })});
   const d=await r.json();
   if(!r.ok) throw new Error(d.error);
-  const local=sessionItemAt(index);
+  const local=sessionItems[checkIndex];
   if(local){
    local.answer=answer;
    local.correct=d.correct?1:local.correct;
@@ -300,20 +322,31 @@ async function check(){
    local.attempt_count=(local.attempt_count||0)+1;
    local.feedback=d;
   }
-  if(d.correct) correctToday.add(index);
+  if(d.correct) correctToday.add(checkIndex);
+
+  const stillSameQuestion=epoch===questionEpoch&&index===checkIndex&&exercises[index]?.id===checkExerciseId;
+  if(!stillSameQuestion) return;
+
   showFeedback(d);
   $("score").textContent="Completed "+correctToday.size+" / "+exercises.length;
   if(correctToday.size===exercises.length){
    if(currentPracticeMode==="today") await fetch("/api/complete-day",{method:"POST"});
    const payload=await get("/api/sessions/"+currentSessionId);
-   showSessionReport(payload);
+   if(epoch===questionEpoch) showSessionReport(payload);
   }
  }catch(e){
-  $("result").className="result bad";
-  $("result").textContent=e.message;
+  const stillSameQuestion=epoch===questionEpoch&&index===checkIndex&&exercises[index]?.id===checkExerciseId;
+  if(stillSameQuestion){
+   $("result").className="result bad";
+   $("result").textContent=e.message;
+  }
  }finally{
-  $("loading").classList.add("hidden");
-  $("checkBtn").disabled=false;
+  if(epoch===questionEpoch){
+   $("loading").classList.add("hidden");
+   $("checkBtn").disabled=false;
+  }else{
+   $("checkBtn").disabled=false;
+  }
  }
 }
 
@@ -640,12 +673,14 @@ $("clearBtn").onclick=async()=>{
 
 $("prevBtn").onclick=async()=>{
  if(index>0){
+  clearTimeout(answerSaveTimer);answerSaveTimer=null;
   try{await saveCurrentItem();index--;if(currentSessionId)await patch("/api/sessions/"+currentSessionId,{currentIndex:index});render();}catch(e){alert(e.message);}
  }
 };
 
 $("nextBtn").onclick=async()=>{
  if(index<exercises.length-1){
+  clearTimeout(answerSaveTimer);answerSaveTimer=null;
   try{await saveCurrentItem();index++;if(currentSessionId)await patch("/api/sessions/"+currentSessionId,{currentIndex:index});render();}catch(e){alert(e.message);}
  }else if(currentSessionId){
   try{showSessionReport(await get("/api/sessions/"+currentSessionId));}catch(e){alert(e.message);}
@@ -654,7 +689,19 @@ $("nextBtn").onclick=async()=>{
 
 $("answer").addEventListener("input",()=>{
  clearTimeout(answerSaveTimer);
- answerSaveTimer=setTimeout(async()=>{try{await saveCurrentItem({answer:$("answer").value});}catch(e){console.warn(e);}},700);
+ const capturedIndex=index;
+ const capturedAnswer=$("answer").value;
+ const capturedSessionId=currentSessionId;
+ answerSaveTimer=setTimeout(async()=>{
+  try{
+   if(capturedSessionId&&capturedSessionId===currentSessionId){
+    await patch("/api/sessions/"+capturedSessionId+"/items/"+capturedIndex,{answer:capturedAnswer});
+    if(sessionItems[capturedIndex]) sessionItems[capturedIndex].answer=capturedAnswer;
+   }else if(capturedIndex===index){
+    await saveCurrentItem({answer:capturedAnswer});
+   }
+  }catch(e){console.warn(e);}
+ },700);
 });
 
 $("answer").addEventListener("keydown",e=>{
