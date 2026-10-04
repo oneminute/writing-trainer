@@ -1234,6 +1234,29 @@ function precheckStudentAnswer(answer,modelAnswer,lesson){
  return null;
 }
 
+const CHECKER_RUBRIC_VERSION=2;
+
+function normalizeWritingJudgment(result,{lesson=null}={}){
+ const r={...result};
+ r.meaning=r.meaning==="ok"?"ok":"needs_work";
+ r.grammar=r.grammar==="ok"?"ok":"needs_work";
+ r.tense=["ok","needs_work","not_applicable"].includes(r.tense)?r.tense:"not_applicable";
+ r.capitalization=r.capitalization==="ok"?"ok":"needs_work";
+ r.punctuation=r.punctuation==="ok"?"ok":"needs_work";
+ r.skillSuccess=Boolean(r.skillSuccess);
+
+ const lessonTitle=String(lesson?.title||"").toLowerCase();
+ const objective=String(lesson?.objective||"").toLowerCase();
+ const tenseIsCentral=/tense|past|present|future|will|did|was|were|verb form/.test(lessonTitle+" "+objective);
+ const corePass=r.meaning==="ok"&&r.grammar==="ok"&&r.skillSuccess&&(!tenseIsCentral||r.tense!=="needs_work");
+ r.correct=Boolean(corePass);
+
+ if(!r.feedback) r.feedback=r.correct?"Good work.":"Revise the sentence so it fully answers the prompt and meets the lesson target.";
+ if(!r.suggestion) r.suggestion=r.correct?"Keep the same grammar pattern in a new sentence.":"Check the prompt meaning and the lesson rule, then revise.";
+ if(r.correct&&r.errorTag&&r.errorTag!=="none") r.errorTag="none";
+ return r;
+}
+
 app.post("/api/check",async(req,res)=>{
  try{
   const {exerciseId,prompt,answer,grammarFocus,modelAnswer,skillId,lessonId,exerciseType,sessionId,position,hintLevel=0,modelViewed=false}=req.body??{};
@@ -1245,13 +1268,86 @@ app.post("/api/check",async(req,res)=>{
   const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
   const previousAttempts=sessionItem?.attempt_count||0;
   const firstTry=previousAttempts===0;
-  const lessonRules=resolvedLesson?parseJsonArray(resolvedLesson.rules_json).join(" | "):"";
-  const lessonErrors=resolvedLesson?parseJsonArray(resolvedLesson.common_errors_json).join(" | "):"";
-  const instructions="You are a concise writing coach for an 11-year-old ESL student. Judge meaning and grammar, not exact wording. Accept natural alternatives. Evaluate the named target skill and assigned curriculum lesson separately. Capitalization or punctuation alone must not fail grammar/meaning. errorTag should be a short stable grammar category or 'none'. Keep feedback child-friendly. Follow the deterministic curriculum rule rather than inventing a new target.";
-  const input="Prompt: "+prompt+"\nTarget skill: "+(skill?.name||skillId)+"\nCurriculum lesson: "+(resolvedLesson?.title||resolvedLessonId||"legacy")+"\nLesson objective: "+(resolvedLesson?.objective||"")+"\nLesson rules: "+lessonRules+"\nCommon target errors: "+lessonErrors+"\nFocus: "+(grammarFocus||"")+"\nStudent: "+answer+"\nReference only: "+(modelAnswer||"(none)")+"\nRequired JSON keys: correct(boolean), meaning(ok|needs_work), grammar(ok|needs_work), tense(ok|needs_work|not_applicable), capitalization(ok|needs_work), punctuation(ok|needs_work), feedback(string), suggestion(string), betterSentence(string), skillSuccess(boolean), errorTag(string).";
+  const lessonRules=resolvedLesson?parseJsonArray(resolvedLesson.rules_json):[];
+  const lessonErrors=resolvedLesson?parseJsonArray(resolvedLesson.common_errors_json):[];
+  const lessonRequired=resolvedLesson?parseJsonArray(resolvedLesson.required_elements_json):[];
+  const lessonAvoid=resolvedLesson?parseJsonArray(resolvedLesson.avoid_json):[];
+  const lessonPrompts=resolvedLesson?parseJsonArray(resolvedLesson.prompt_patterns_json):[];
+  const instructions=[
+   "You are the grading engine for a structured English-writing curriculum for an 11-year-old sixth-grade ESL learner.",
+   "You are NOT free to invent a different learning objective. Grade against the assigned prompt, curriculum lesson, lesson rules, required elements, and reference answer below.",
+   "SCORING ORDER:",
+   "1. Meaning coverage: decide whether the student's sentence actually answers the prompt and includes every meaning element the prompt requires. If a required idea is missing, meaning=needs_work.",
+   "2. Lesson target: decide whether the student successfully demonstrates the assigned curriculum lesson. This is skillSuccess. If the target grammar form is wrong, skillSuccess=false even if the general meaning is understandable.",
+   "3. Grammar: judge sentence structure, subject/verb agreement, articles, pronouns, word order, verb form, clause structure, and other grammar actually used.",
+   "4. Tense: judge tense separately. If tense is central to the lesson and the tense/form is wrong, the answer cannot be fully correct.",
+   "5. Mechanics: capitalization and punctuation are separate. A capitalization-only or punctuation-only problem must NOT change meaning or grammar to needs_work.",
+   "REFERENCE ANSWER POLICY:",
+   "- The reference/model answer is one good answer, NOT an exact-match key.",
+   "- Accept natural American-English alternatives with the same required meaning and correct target grammar.",
+   "- Do not reject synonyms, harmless word-order variation, or a different but natural expression.",
+   "- But do not accept an answer that changes, omits, or contradicts a required idea just because it is grammatical.",
+   "FEEDBACK POLICY:",
+   "- feedback: briefly explain the most important issue in child-friendly English.",
+   "- suggestion: give a useful clue for revision without simply saying 'wrong'.",
+   "- betterSentence: give the closest natural correction of the student's intended sentence; preserve the student's wording when possible instead of replacing it with an unrelated model sentence.",
+   "- errorTag: use one short stable grammar category such as verb_tense, auxiliary_base_form, subject_verb_agreement, article, pronoun, singular_plural, word_order, clause_structure, capitalization, punctuation, vocabulary, meaning, incomplete_sentence, or none.",
+   "OVERALL CORRECT POLICY:",
+   "- correct may be true only when meaning=ok, grammar=ok, and skillSuccess=true. If tense is central to the assigned lesson, tense must not be needs_work.",
+   "- Capitalization or punctuation alone may still be marked needs_work while correct remains true.",
+   "Never give credit because an answer merely contains a few related words. Judge the complete sentence against the exercise purpose.",
+   "Return ONLY the required JSON object."
+  ].join("\n");
+  const input=[
+   "=== EXERCISE TO GRADE ===",
+   "Prompt: "+prompt,
+   "Student answer: "+answer,
+   "",
+   "=== CURRICULUM PURPOSE ===",
+   "Target skill: "+(skill?.name||skillId),
+   "Lesson ID: "+(resolvedLessonId||"legacy"),
+   "Lesson title: "+(resolvedLesson?.title||""),
+   "Lesson objective: "+(resolvedLesson?.objective||""),
+   "Displayed focus: "+(grammarFocus||""),
+   "Difficulty guidance: "+(resolvedLesson?.difficulty||""),
+   "",
+   "Lesson rules:",
+   ...(lessonRules.length?lessonRules.map((x,i)=>(i+1)+". "+x):["(none)"]),
+   "",
+   "Required elements:",
+   ...(lessonRequired.length?lessonRequired.map((x,i)=>(i+1)+". "+x):["(none beyond the prompt)"]),
+   "",
+   "Common errors this lesson is designed to catch:",
+   ...(lessonErrors.length?lessonErrors.map((x,i)=>(i+1)+". "+x):["(none listed)"]),
+   "",
+   "Do not turn these into new requirements:",
+   ...(lessonAvoid.length?lessonAvoid.map((x,i)=>(i+1)+". "+x):["(none)"]),
+   "",
+   "Example prompt patterns for understanding lesson intent only:",
+   ...(lessonPrompts.length?lessonPrompts.map((x,i)=>(i+1)+". "+x):["(none)"]),
+   "",
+   "=== REFERENCE ANSWER ===",
+   modelAnswer||"(none)",
+   "Use this to understand intended meaning and target construction. Do not require exact wording.",
+   "",
+   "=== REQUIRED OUTPUT FIELDS ===",
+   "correct(boolean)",
+   "meaning(ok|needs_work)",
+   "grammar(ok|needs_work)",
+   "tense(ok|needs_work|not_applicable)",
+   "capitalization(ok|needs_work)",
+   "punctuation(ok|needs_work)",
+   "feedback(string)",
+   "suggestion(string)",
+   "betterSentence(string)",
+   "skillSuccess(boolean)",
+   "errorTag(string)"
+  ].join("\n");
   const precheck=precheckStudentAnswer(answer,modelAnswer,resolvedLesson);
-  const r=precheck||await runWritingCheck(input,instructions);
+  let r=precheck||await runWritingCheck(input,instructions);
+  r=normalizeWritingJudgment(r,{lesson:resolvedLesson});
   r.errorTag=normalizeErrorTag(r.errorTag,r);
+  r.rubricVersion=CHECKER_RUBRIC_VERSION;
   let evidence=0;
   if(r.skillSuccess){
    if(modelViewed) evidence=.25;
