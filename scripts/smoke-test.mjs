@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import Database from "better-sqlite3";
 
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"writing-trainer-smoke-"));
 const port=54000+(process.pid%1000);
@@ -82,6 +83,14 @@ try{
 
  const active=await json("/api/practice-groups/"+today.groupId+"/active-session");
  assert(active.session&&active.session.id===session.session.id,"Active session resume lookup failed");
+
+ const testDb=new Database(path.join(tmp,"writing-trainer.db"));
+ const yesterday=new Date(Date.now()-86400000).toLocaleDateString("en-CA");
+ testDb.prepare("INSERT INTO attempts(exercise_id,prompt,answer,correct,session_date) VALUES(?,?,?,?,?)").run("smoke-old","我通常在放学后做作业。","I usually do my homework after school.",1,yesterday);
+ testDb.close();
+ const laterToday=await json("/api/today");
+ assert(laterToday.needsGeneration===true,"Old starter set should be replaced on later practice days");
+ assert(Array.isArray(laterToday.exercises)&&laterToday.exercises.length===0,"Later Today should not silently reload the starter set");
 
  console.log("Smoke test passed: settings, detailed curriculum plan, today, progress, history, sets, session persistence.");
 } finally {
