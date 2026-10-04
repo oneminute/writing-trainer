@@ -1210,7 +1210,7 @@ function precheckStudentAnswer(answer,modelAnswer,lesson){
  const words=englishWordTokens(text);
  const modelWords=englishWordTokens(modelAnswer||"");
  const stage=Number(lesson?.stage||1);
- const expectedMin=stage>=10?Math.max(4,Math.min(12,Math.ceil(modelWords.length*.35))):Math.max(2,Math.min(5,Math.ceil(modelWords.length*.45)));
+ const expectedMin=stage>=10?Math.max(4,Math.min(12,Math.ceil(modelWords.length*.35))):2;
  const letterCount=(text.match(/[A-Za-z]/g)||[]).length;
  const modelLetterCount=(String(modelAnswer||"").match(/[A-Za-z]/g)||[]).length;
  const tooShortByWords=words.length<expectedMin;
