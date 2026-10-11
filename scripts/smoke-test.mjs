@@ -11,7 +11,7 @@ const base="http://127.0.0.1:"+port;
 
 const child=spawn(process.execPath,["server.js"],{
  cwd:process.cwd(),
- env:{...process.env,HOST:"127.0.0.1",PORT:String(port),DATA_DIR:tmp,LLM_PROVIDER:"ollama"},
+ env:{...process.env,HOST:"127.0.0.1",PORT:String(port),DATA_DIR:tmp,LLM_PROVIDER:"ollama",OLLAMA_AUTO_START:"false"},
  stdio:["ignore","pipe","pipe"]
 });
 
