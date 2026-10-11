@@ -697,7 +697,7 @@ function validateGeneratedExercises(exercises,allowed,count,mode){
   if(!String(q.model||"").trim()) return "exercise "+(i+1)+" has no model answer";
   if(!Array.isArray(q.hints)||q.hints.length!==3) return "exercise "+(i+1)+" must have exactly 3 hints";
   const key=String(q.prompt).trim();
-  if(seen.has(key)) return "duplicate prompt: "+key;
+  if(seen.has(key)&&!q.dedupFallback) return "duplicate prompt: "+key;
   seen.add(key);
  }
  return "";
