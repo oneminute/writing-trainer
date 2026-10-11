@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 import { SKILLS, skillMap, statusFromMastery, nextReviewDays } from "./src/curriculum.js";
 import { CURRICULUM_VERSION, CURRICULUM_STAGES, CURRICULUM_LESSONS } from "./src/plan.js";
 import { BASE_EXERCISES } from "./src/exercises.js";
@@ -23,8 +24,131 @@ const ollamaModel = process.env.OLLAMA_WRITING_MODEL || "hf.co/unsloth/Qwen3.5-9
 const ollamaTimeoutMs = Number(process.env.OLLAMA_WRITING_TIMEOUT_SECONDS || 60) * 1000;
 const ollamaGenerationTimeoutMs = Number(process.env.OLLAMA_GENERATION_TIMEOUT_SECONDS || 180) * 1000;
 const ollamaGenerationBatchSize = Math.max(1,Math.min(6,Number(process.env.OLLAMA_GENERATION_BATCH_SIZE || 4)));
+const ollamaAutoStart = !["0","false","no","off"].includes(String(process.env.OLLAMA_AUTO_START || "true").toLowerCase());
+const ollamaStartTimeoutMs = Math.max(1000,Number(process.env.OLLAMA_START_TIMEOUT_SECONDS || 8)*1000);
+let ollamaStartupPromise = null;
+let ollamaStartAttempted = false;
 const openaiModel = process.env.OPENAI_MODEL || "gpt-5.6-luna";
 const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+function sleep(ms){
+ return new Promise(resolve=>setTimeout(resolve,ms));
+}
+
+function localOllamaHost(){
+ for(const raw of ollamaCandidateUrls){
+  try{
+   const u=new URL(raw);
+   if(["127.0.0.1","localhost","::1"].includes(u.hostname)){
+    return (u.hostname==="::1"?"[::1]":u.hostname)+":"+(u.port||"11434");
+   }
+  }catch{}
+ }
+ return "127.0.0.1:12000";
+}
+
+function ollamaExecutableCandidates(){
+ const values=[];
+ if(process.env.OLLAMA_BIN) values.push(process.env.OLLAMA_BIN);
+ values.push("ollama");
+ if(process.platform==="win32"&&process.env.LOCALAPPDATA){
+  values.push(path.join(process.env.LOCALAPPDATA,"Programs","Ollama","ollama.exe"));
+ }
+ return [...new Set(values.filter(Boolean))];
+}
+
+async function probeOllama(timeoutMs=800){
+ for(const base of ollamaCandidateOrder()){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+   const response=await fetch(base+"/api/tags",{signal:controller.signal});
+   if(response.ok){
+    activeOllamaBaseUrl=base;
+    return base;
+   }
+  }catch{}
+  finally{clearTimeout(timer);}
+ }
+ return null;
+}
+
+async function spawnOllamaServe(){
+ const host=localOllamaHost();
+ const env={...process.env,OLLAMA_HOST:host};
+ for(const command of ollamaExecutableCandidates()){
+  const started=await new Promise(resolve=>{
+   let settled=false;
+   let child;
+   try{
+    child=spawn(command,["serve"],{
+     detached:true,
+     stdio:"ignore",
+     windowsHide:true,
+     env
+    });
+   }catch{
+    resolve(false);
+    return;
+   }
+   child.once("spawn",()=>{
+    if(settled) return;
+    settled=true;
+    child.unref();
+    resolve(true);
+   });
+   child.once("error",()=>{
+    if(settled) return;
+    settled=true;
+    resolve(false);
+   });
+   setTimeout(()=>{
+    if(settled) return;
+    settled=true;
+    try{child.unref();}catch{}
+    resolve(true);
+   },750);
+  });
+  if(started){
+   console.log("[Ollama] Start requested with '"+command+" serve' on "+host);
+   return true;
+  }
+ }
+ console.warn("[Ollama] Could not launch Ollama: executable was not found or could not be started.");
+ return false;
+}
+
+async function ensureOllamaRunning(){
+ if(llmProvider==="openai") return null;
+ const existing=await probeOllama();
+ if(existing) return existing;
+ if(!ollamaAutoStart){
+  console.warn("[Ollama] Not running; automatic startup is disabled.");
+  return null;
+ }
+ if(ollamaStartupPromise) return ollamaStartupPromise;
+ if(ollamaStartAttempted) return null;
+
+ ollamaStartAttempted=true;
+ ollamaStartupPromise=(async()=>{
+  console.log("[Ollama] Not detected. Trying to start Ollama automatically...");
+  const launched=await spawnOllamaServe();
+  if(!launched) return null;
+
+  const deadline=Date.now()+ollamaStartTimeoutMs;
+  while(Date.now()<deadline){
+   await sleep(500);
+   const base=await probeOllama(1000);
+   if(base){
+    console.log("[Ollama] Ready at "+base+" using model "+ollamaModel);
+    return base;
+   }
+  }
+  console.warn("[Ollama] Automatic startup did not become ready within "+Math.round(ollamaStartTimeoutMs/1000)+" seconds. Writing Trainer will continue without blocking startup.");
+  return null;
+ })().finally(()=>{ollamaStartupPromise=null;});
+ return ollamaStartupPromise;
+}
 
 function ollamaCandidateOrder(){
  return activeOllamaBaseUrl
@@ -32,7 +156,8 @@ function ollamaCandidateOrder(){
   : ollamaCandidateUrls;
 }
 
-async function requestOllamaJson(pathname,{method="GET",body=null,timeoutMs=5000}={}){
+async function requestOllamaJson(pathname,{method="GET",body=null,timeoutMs=5000,skipAutoStart=false}={}){
+ if(!skipAutoStart&&pathname!=="/api/tags"&&!activeOllamaBaseUrl) await ensureOllamaRunning();
  const errors=[];
  for(const base of ollamaCandidateOrder()){
   const controller=new AbortController();
@@ -1385,7 +1510,7 @@ app.post("/api/check",async(req,res)=>{
 
 app.get("/api/health",async(req,res)=>{
  let ollamaAvailable=false,ollamaError="";
- try{await requestOllamaJson("/api/tags",{timeoutMs:1500});ollamaAvailable=true;}catch(e){ollamaError=e?.message||String(e);}
+ try{const base=await probeOllama(1200);ollamaAvailable=Boolean(base);if(!base)ollamaError="Ollama is not currently reachable.";}catch(e){ollamaError=e?.message||String(e);}
  res.json({
   llm_provider:llmProvider,
   ollama_available:ollamaAvailable,
@@ -1396,6 +1521,8 @@ app.get("/api/health",async(req,res)=>{
   ollama_check_timeout_seconds:Math.round(ollamaTimeoutMs/1000),
   ollama_generation_timeout_seconds:Math.round(ollamaGenerationTimeoutMs/1000),
   ollama_generation_batch_size:ollamaGenerationBatchSize,
+  ollama_auto_start:ollamaAutoStart,
+  ollama_start_timeout_seconds:Math.round(ollamaStartTimeoutMs/1000),
   openai_enabled:Boolean(client),
   openai_model:openaiModel
  });
@@ -1415,14 +1542,11 @@ app.use((err,req,res,next)=>{
 });
 
 const host=process.env.HOST||"127.0.0.1";
-app.listen(port,host,async()=>{
+app.listen(port,host,()=>{
  console.log("Writing Trainer running on "+host+":"+port);
  if(llmProvider==="ollama"||llmProvider==="auto"){
-  try{
-   const {base}=await requestOllamaJson("/api/tags",{timeoutMs:1200});
-   console.log("[Ollama] Ready at "+base+" using model "+ollamaModel);
-  }catch(e){
-   console.warn("[Ollama] Not reachable yet. "+e.message);
-  }
+  ensureOllamaRunning().catch(e=>{
+   console.warn("[Ollama] Startup check failed; continuing without Ollama. "+(e?.message||e));
+  });
  }
 });
