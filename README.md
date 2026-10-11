@@ -238,16 +238,26 @@ Copy-Item .env.example .env
 
 The default local-AI configuration is suitable for Ollama.
 
-### 5. Start Ollama
+### 5. Ollama startup
 
-Example using port 12000:
+Writing Trainer now checks Ollama automatically when the app starts.
+
+If Ollama is already running, it reuses it. If not, it tries to launch:
+
+```text
+ollama serve
+```
+
+using the configured/local Ollama host. If automatic startup fails, Writing Trainer still starts and logs a warning.
+
+You can still start Ollama manually if preferred:
 
 ```powershell
 $env:OLLAMA_HOST="127.0.0.1:12000"
 ollama serve
 ```
 
-Make sure the configured model is available in Ollama.
+Set `OLLAMA_AUTO_START=false` to disable this behavior.
 
 ### 6. Start Writing Trainer
 
