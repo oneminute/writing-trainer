@@ -121,7 +121,10 @@ async function spawnOllamaServe(){
 async function ensureOllamaRunning(){
  if(llmProvider==="openai") return null;
  const existing=await probeOllama();
- if(existing) return existing;
+ if(existing){
+  console.log("[Ollama] Already running at "+existing+" using model "+ollamaModel);
+  return existing;
+ }
  if(!ollamaAutoStart){
   console.warn("[Ollama] Not running; automatic startup is disabled.");
   return null;
