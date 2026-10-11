@@ -24,6 +24,8 @@ const ollamaModel = process.env.OLLAMA_WRITING_MODEL || "hf.co/unsloth/Qwen3.5-9
 const ollamaTimeoutMs = Number(process.env.OLLAMA_WRITING_TIMEOUT_SECONDS || 60) * 1000;
 const ollamaGenerationTimeoutMs = Number(process.env.OLLAMA_GENERATION_TIMEOUT_SECONDS || 180) * 1000;
 const ollamaGenerationBatchSize = Math.max(1,Math.min(6,Number(process.env.OLLAMA_GENERATION_BATCH_SIZE || 4)));
+const ollamaGenerationTemperature = Math.max(0,Math.min(1,Number(process.env.OLLAMA_GENERATION_TEMPERATURE || 0.35)));
+const generationNoveltyRetries = Math.max(2,Math.min(12,Number(process.env.GENERATION_NOVELTY_RETRIES || 6)));
 const ollamaAutoStart = !["0","false","no","off"].includes(String(process.env.OLLAMA_AUTO_START || "true").toLowerCase());
 const ollamaStartTimeoutMs = Math.max(1000,Number(process.env.OLLAMA_START_TIMEOUT_SECONDS || 8)*1000);
 let ollamaStartupPromise = null;
@@ -782,7 +784,7 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    "expected output="+(s?.sentence_mode||""),
    "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
   ].join("; ")}).join("\n");
-  const historyPrompts=recentHistoricalPrompts(batchAllowed,40);
+  const historyPrompts=recentHistoricalPrompts(batchAllowed,80);
   const forbidden=[...new Set([...historyPrompts,...priorPrompts])];
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
@@ -796,7 +798,7 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
     timeoutMs:ollamaGenerationTimeoutMs,
     body:{
      model:ollamaModel,stream:false,think:false,keep_alive:"10m",format,
-     options:{temperature:0},
+     options:{temperature:ollamaGenerationTemperature},
      messages:[{role:"system",content:instructions},{role:"user",content:input}]
     }
    });
@@ -825,7 +827,7 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
    "expected output="+(s?.sentence_mode||""),
    "stage guardrails="+(s?.generationGuardrails||[]).join(" | ")
   ].join("; ")}).join("\n");
-  const historyPrompts=recentHistoricalPrompts(batchAllowed,40);
+  const historyPrompts=recentHistoricalPrompts(batchAllowed,80);
   const forbidden=[...new Set([...historyPrompts,...priorPrompts])];
   const input="Mode: "+mode+". Generate exactly "+batchCount+" exercises. Allowed primary skill IDs: "+batchAllowed.join(", ")+
    ". Skill descriptions: "+batchAllowed.map(id=>id+": "+skillMap[id].description).join("; ")+
@@ -842,60 +844,92 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
   return JSON.parse(r.output_text).exercises;
  }
 
- async function generateBatch(batchSequence,priorPrompts,batchStart){
-  const batchAllowed=[...new Set(batchSequence)];
-  const batchCount=batchSequence.length;
-  let lastError="";
-  for(let attempt=1;attempt<=2;attempt++){
-   const retryNote=lastError?" Previous output was rejected because: "+lastError+". Correct that exact problem.":"";
-   try{
-    let batch;
-    if(llmProvider==="openai"){
-     batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
-    }else{
-     try{
-      batch=await callOllamaBatch(batchSequence,priorPrompts,retryNote,batchStart);
-     }catch(e){
-      if(llmProvider!=="auto") throw e;
-      console.warn("Ollama generation batch failed; using OpenAI fallback:",e.message);
-      batch=await callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
-     }
-    }
-    let problem=validateGeneratedExercises(batch,batchAllowed,batchCount,mode);
-    if(!problem){
-     for(let i=0;i<batchCount;i++){
-      const assignedLesson=lessonSequence[batchStart+i];
-      if(batch[i]?.skill!==batchSequence[i]){
-       problem="exercise "+(i+1)+" must use skill "+batchSequence[i]+", got "+batch[i]?.skill;
-       break;
-      }
-      if(batch[i]?.lessonId!==assignedLesson?.id){
-       problem="exercise "+(i+1)+" must use lessonId "+assignedLesson?.id+", got "+batch[i]?.lessonId;
-       break;
-      }
-      const languageProblem=promptLanguageProblem(batch[i]?.prompt,assignedLesson);
-      if(languageProblem){problem="exercise "+(i+1)+" "+languageProblem;break;}
-      const generatedPrompt=String(batch[i]?.prompt||"").trim();
-      const generatedKey=normalizePromptKey(generatedPrompt);
-      if(priorPrompts.some(p=>normalizePromptKey(p)===generatedKey)){
-       problem="prompt duplicates an earlier batch: "+generatedPrompt;
-       break;
-      }
-      if(historicalPromptKeys.has(generatedKey)){
-       problem="prompt was already used in an earlier saved practice set: "+generatedPrompt;
-       break;
-      }
-     }
-    }
-    if(!problem) return batch;
-    lastError=problem;
-    console.warn("Rejected generated batch:",problem);
-   }catch(e){
-    lastError=e?.message||String(e);
-    if(lastError.startsWith("Ollama generation timed out")||attempt===2) throw new Error(lastError);
-   }
+ async function requestGenerationBatch(batchSequence,priorPrompts,retryNote,batchStart){
+  if(llmProvider==="openai") return callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
+  try{
+   return await callOllamaBatch(batchSequence,priorPrompts,retryNote,batchStart);
+  }catch(e){
+   if(llmProvider!=="auto") throw e;
+   console.warn("Ollama generation batch failed; using OpenAI fallback:",e.message);
+   return callOpenAIBatch(batchSequence,priorPrompts,retryNote,batchStart);
   }
-  throw new Error(lastError||"Exercise generation failed");
+ }
+
+ function generatedItemProblem(candidate,expectedSkill,assignedLesson,forbiddenPrompts=[]){
+  const basic=validateGeneratedExercises([candidate],[expectedSkill],1,mode);
+  if(basic) return basic;
+  if(candidate?.skill!==expectedSkill) return "must use skill "+expectedSkill+", got "+candidate?.skill;
+  if(candidate?.lessonId!==assignedLesson?.id) return "must use lessonId "+assignedLesson?.id+", got "+candidate?.lessonId;
+  const languageProblem=promptLanguageProblem(candidate?.prompt,assignedLesson);
+  if(languageProblem) return languageProblem;
+
+  const prompt=String(candidate?.prompt||"").trim();
+  const key=normalizePromptKey(prompt);
+  if(forbiddenPrompts.some(p=>normalizePromptKey(p)===key)) return "prompt duplicates another prompt in this generation: "+prompt;
+  if(historicalPromptKeys.has(key)) return "prompt was already used in an earlier saved practice set: "+prompt;
+  return "";
+ }
+
+ async function generateBatch(batchSequence,priorPrompts,batchStart){
+  const batchCount=batchSequence.length;
+  let initialBatch=[];
+  try{
+   initialBatch=await requestGenerationBatch(batchSequence,priorPrompts,"",batchStart);
+  }catch(e){
+   throw e;
+  }
+  if(!Array.isArray(initialBatch)){
+   console.warn("[Generation] Model returned a non-array batch; regenerating items individually.");
+   initialBatch=[];
+  }else if(initialBatch.length!==batchCount){
+   console.warn("[Generation] Model returned "+initialBatch.length+" items for a "+batchCount+"-item batch; missing/extra items will be repaired individually.");
+  }
+
+  const accepted=[];
+  const acceptedPrompts=[];
+  for(let i=0;i<batchCount;i++){
+   const absoluteIndex=batchStart+i;
+   const expectedSkill=batchSequence[i];
+   const assignedLesson=lessonSequence[absoluteIndex];
+   let candidate=initialBatch[i]||null;
+   let problem=generatedItemProblem(candidate,expectedSkill,assignedLesson,[...priorPrompts,...acceptedPrompts]);
+   const rejectedPrompts=[];
+
+   for(let attempt=1;problem&&attempt<=generationNoveltyRetries;attempt++){
+    if(candidate?.prompt) rejectedPrompts.push(String(candidate.prompt).trim());
+    console.warn("[Generation] Replacing item "+(absoluteIndex+1)+" ("+attempt+"/"+generationNoveltyRetries+"): "+problem);
+
+    const noveltyInstruction=
+     " The previous candidate for this ONE item was rejected because: "+problem+
+     ". Generate a substantially different sentence for the SAME lesson. Change at least two concrete details such as the person, object, place, time, school activity, hobby, food, weather, or event."+
+     (rejectedPrompts.length?" Never reuse these rejected candidates: "+rejectedPrompts.join(" | "):"");
+
+    const forbidden=[...priorPrompts,...acceptedPrompts,...rejectedPrompts];
+    try{
+     const replacement=await requestGenerationBatch([expectedSkill],forbidden,noveltyInstruction,absoluteIndex);
+     candidate=Array.isArray(replacement)?replacement[0]:null;
+    }catch(e){
+     // Infrastructure/model availability errors are real failures. Validation/novelty failures are handled below.
+     throw e;
+    }
+    problem=generatedItemProblem(candidate,expectedSkill,assignedLesson,[...priorPrompts,...acceptedPrompts]);
+   }
+
+   if(problem){
+    const duplicateOnly=/duplicate|already used/i.test(problem);
+    if(duplicateOnly&&candidate){
+     // Repetition is a content-quality issue, not an application failure. Keep the practice usable.
+     console.warn("[Generation] Novelty retries exhausted for item "+(absoluteIndex+1)+". Keeping the last valid-structure candidate instead of failing the whole practice set: "+problem);
+     candidate.dedupFallback=true;
+    }else{
+     throw new Error("Could not generate a valid exercise for item "+(absoluteIndex+1)+": "+problem);
+    }
+   }
+
+   accepted.push(candidate);
+   acceptedPrompts.push(String(candidate?.prompt||"").trim());
+  }
+  return accepted;
  }
 
  const all=[];
@@ -919,7 +953,7 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
     problem="exercise "+(i+1)+" must use lessonId "+lessonSequence[i]?.id+", got "+all[i]?.lessonId;
     break;
    }
-   if(historicalPromptKeys.has(normalizePromptKey(all[i]?.prompt))){
+   if(historicalPromptKeys.has(normalizePromptKey(all[i]?.prompt))&&!all[i]?.dedupFallback){
     problem="exercise "+(i+1)+" repeats a prompt from saved practice history: "+all[i]?.prompt;
     break;
    }
@@ -1524,6 +1558,8 @@ app.get("/api/health",async(req,res)=>{
   ollama_check_timeout_seconds:Math.round(ollamaTimeoutMs/1000),
   ollama_generation_timeout_seconds:Math.round(ollamaGenerationTimeoutMs/1000),
   ollama_generation_batch_size:ollamaGenerationBatchSize,
+  ollama_generation_temperature:ollamaGenerationTemperature,
+  generation_novelty_retries:generationNoveltyRetries,
   ollama_auto_start:ollamaAutoStart,
   ollama_start_timeout_seconds:Math.round(ollamaStartTimeoutMs/1000),
   openai_enabled:Boolean(client),
