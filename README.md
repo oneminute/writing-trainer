@@ -211,6 +211,8 @@ http://127.0.0.1:11434
 
 Exercise generation is batched so a local 9B model does not need to generate 12–20 exercises in a single response.
 
+Duplicate generated prompts are treated as recoverable content-quality failures: the server keeps valid items, regenerates only the rejected item with stronger novelty constraints, and does not abort the whole practice session merely because Qwen reused an old prompt.
+
 ## Quick start — Windows
 
 ### 1. Clone
@@ -294,6 +296,8 @@ OLLAMA_WRITING_MODEL=hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL
 OLLAMA_WRITING_TIMEOUT_SECONDS=60
 OLLAMA_GENERATION_TIMEOUT_SECONDS=180
 OLLAMA_GENERATION_BATCH_SIZE=4
+OLLAMA_GENERATION_TEMPERATURE=0.35
+GENERATION_NOVELTY_RETRIES=6
 ```
 
 Optional OpenAI fallback:
