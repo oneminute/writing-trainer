@@ -1,14 +1,37 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Writing Trainer</title><link rel="stylesheet" href="/styles.css"></head>
 <body><main class="shell">
 <header class="topbar"><div><div class="eyebrow">WRITING TRAINER</div><h1>Build real English writing.</h1></div><nav>
-<button class="tab active" data-view="today">Today</button><button class="tab" data-view="plan">Plan</button><button class="tab" data-view="review">Review</button><button class="tab" data-view="progress">Progress</button><button class="tab" data-view="sets">Sets</button><button class="tab" data-view="history">History</button><button class="tab" data-view="settings">Settings</button></nav></header>
+<button class="tab active" data-view="today">Today</button><button class="tab" data-view="builder">Builder</button><button class="tab" data-view="plan">Plan</button><button class="tab" data-view="review">Review</button><button class="tab" data-view="progress">Progress</button><button class="tab" data-view="sets">Sets</button><button class="tab" data-view="history">History</button><button class="tab" data-view="settings">Settings</button></nav></header>
 <section id="todayView" class="view">
 <div class="card hero"><div><h2 id="dayTitle">Today's Practice</h2><p id="dayMeta" class="muted"></p><div class="actions"><button id="generateToday" class="primary">Generate Today Practice</button><button id="regenerateToday">Regenerate</button></div></div><div class="progress-wrap"><div id="progressText"></div><div class="progress"><div id="progressBar"></div></div></div></div>
-<div class="card"><div class="question-top"><span id="type" class="pill"></span><span id="focus" class="pill"></span></div><div id="lessonContext" class="lesson-context"></div><h2 id="prompt"></h2><label>Write one complete English sentence:</label><textarea id="answer" spellcheck="true" placeholder="Type your sentence here..."></textarea>
+<div class="card"><div class="question-top"><span id="type" class="pill"></span><span id="focus" class="pill"></span></div><div id="lessonContext" class="lesson-context"></div><h2 id="prompt"></h2><label id="answerLabel">Write one complete English sentence:</label><textarea id="answer" spellcheck="true" placeholder="Type your sentence here..."></textarea>
 <div class="actions"><button id="checkBtn" class="primary">Check with AI ↵</button><button id="hintBtn">Hint</button><button id="modelBtn">Model answer</button><button id="clearBtn">Clear</button></div>
 <div id="loading" class="notice hidden">Checking your sentence…</div><div id="result" class="result hidden"></div><div id="hint" class="notice hint hidden"></div><div id="model" class="notice model hidden"></div>
 <div class="nav"><button id="prevBtn">← Previous</button><span id="score" class="muted"></span><button id="nextBtn" class="primary">Next →</button></div></div>
 <div id="report" class="card hidden"></div></section>
+<section id="builderView" class="view hidden">
+ <div class="card">
+  <h2>Sentence Builder · 渐进式扩写</h2>
+  <p class="muted">不要一开始就写复杂句。先写句子主干，再逐步加入修饰、时间地点、从句和连接关系。每一步都会给出明确中文要求。</p>
+  <div class="builder-grid">
+   <div class="builder-option">
+    <div class="builder-icon">1 → 6</div>
+    <h3>逐步扩写 Sentence Expansion</h3>
+    <p>针对一个语法或表达，从短句主干开始，一步一步扩展成完整句子。中间步骤主要用于训练，最后综合步骤才作为主要 mastery 证据。</p>
+    <label for="builderLesson"><b>选择要练习的语法 / Lesson</b></label>
+    <select id="builderLesson"></select>
+    <button id="startExpansionBuilder" class="primary">开始逐步扩写</button>
+   </div>
+   <div class="builder-option">
+    <div class="builder-icon">时态</div>
+    <h3>时态阶梯 Tense Ladder</h3>
+    <p>围绕同一个主题，从一般现在时逐步变换到一般过去时、过去否定、will、be going to，最后做时间从句综合。</p>
+    <button id="startTenseBuilder" class="primary">开始时态阶梯</button>
+   </div>
+  </div>
+  <div id="builderStatus" class="notice hidden"></div>
+ </div>
+</section>
 <section id="planView" class="view hidden"><div class="card"><h2>Learning Plan</h2><p class="muted">Difficulty advances by demonstrated mastery, not by calendar date.</p><div id="planList"></div></div></section>
 <section id="reviewView" class="view hidden"><div class="card"><h2>Review Queue</h2><p class="muted">Skills return after 1, 3, 7 and 14 days until they become stable.</p><div class="actions"><button id="generateReview" class="primary">Generate Due Review Practice</button></div><div id="reviewList"></div></div></section>
 <section id="progressView" class="view hidden">
