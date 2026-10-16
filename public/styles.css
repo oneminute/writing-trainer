@@ -13,3 +13,5 @@
 .builder-step-context p{margin:8px 0 0;line-height:1.55;color:#4a3b14}
 .previous-builder-answer{background:#fff;border-radius:8px;padding:9px 10px;border:1px dashed #d9c47e}
 @media(max-width:760px){.builder-grid{grid-template-columns:1fr}.builder-step-head{display:block}.builder-step-head span{display:block;margin-top:4px}}
+
+#prompt{white-space:pre-line}
