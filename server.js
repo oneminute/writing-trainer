@@ -998,10 +998,10 @@ function builderResponseSchema(stepCount){
    steps:{
     type:"array",minItems:stepCount,maxItems:stepCount,
     items:{type:"object",additionalProperties:false,properties:{
-     prompt:{type:"string"},
+     targetZh:{type:"string"},
      model:{type:"string"},
      hints:{type:"array",minItems:3,maxItems:3,items:{type:"string"}}
-    },required:["prompt","model","hints"]}
+    },required:["targetZh","model","hints"]}
    }
   },
   required:["titleZh","steps"]
@@ -1072,7 +1072,9 @@ function validateBuilderData(data,stepCount,kind){
  let previousWords=0;
  for(let i=0;i<data.steps.length;i++){
   const step=data.steps[i]||{};
-  if(!containsChinese(step.prompt)) return "step "+(i+1)+" must give a clear Chinese instruction";
+  const targetZh=String(step.targetZh||"").trim();
+  const chineseChars=(targetZh.match(/[\u3400-\u4dbf\u4e00-\u9fff]/gu)||[]).length;
+  if(!containsChinese(targetZh)||chineseChars<6) return "step "+(i+1)+" must provide a complete Chinese target meaning, not a vague instruction";
   if(!String(step.model||"").trim()) return "step "+(i+1)+" has no model answer";
   if(!Array.isArray(step.hints)||step.hints.length!==3) return "step "+(i+1)+" must have exactly 3 hints";
   const words=englishWordTokens(step.model).length;
@@ -1106,8 +1108,8 @@ async function generateBuilderChain({kind="expansion",lessonId=""}={}){
  const baseInstructions=[
   "Create ONE coherent scaffolded writing chain for an 11-year-old Chinese-speaking ESL learner.",
   "All steps must stay on ONE concrete, age-appropriate school-life or daily-life theme.",
-  "CRITICAL: every step prompt must be written in clear Simplified Chinese.",
-  "CRITICAL: every prompt must state the FULL exact Chinese meaning the learner should express at that step, not merely say 'expand it', 'add an adjective', or 'change the tense'.",
+  "CRITICAL: for each step, targetZh must be the FULL exact Chinese meaning the learner should express, not a meta-instruction such as 'expand it', 'add an adjective', or 'change the tense'.",
+  "targetZh must be specific enough that a Chinese-speaking learner knows exactly what information must appear in the English sentence.",
   "Each later expansion step must preserve all important meaning from the previous step and add the newly requested information.",
   "Do not reveal the English model answer inside the Chinese prompt.",
   "The model answer must be natural American English.",
@@ -1137,7 +1139,7 @@ async function generateBuilderChain({kind="expansion",lessonId=""}={}){
   type:"builder",
   skill:lessons[i].skill_id,
   reviewSkills:[],
-  prompt:String(raw.prompt||"").trim(),
+  prompt:"第 "+(i+1)+" 步｜"+steps[i].labelZh+"\n请用英文准确表达：『"+String(raw.targetZh||"").trim()+"』\n本步要求："+steps[i].instructionZh,
   focus:steps[i].labelZh+" · "+lessons[i].title,
   hints:raw.hints.map(x=>String(x)),
   model:String(raw.model||"").trim(),
