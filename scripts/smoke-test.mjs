@@ -45,6 +45,17 @@ function assert(condition,message){
 try{
  await waitForServer();
 
+ const home=await fetch(base+"/").then(r=>r.text());
+ assert(home.includes('id="builderView"'),"Sentence Builder UI is missing");
+ assert(home.includes('id="startExpansionBuilder"')&&home.includes('id="startTenseBuilder"'),"Builder launch controls are missing");
+
+ const badBuilder=await fetch(base+"/api/builder/generate",{
+  method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({kind:"expansion",lessonId:"not-a-real-lesson"})
+ });
+ assert(badBuilder.status===400,"Builder API should reject an unknown lesson before calling an LLM");
+
  let d=await json("/api/settings");
  assert(d.practiceCount===12,"default practiceCount should be 12");
 
@@ -61,6 +72,7 @@ try{
  assert(Array.isArray(plan.stages)&&plan.stages.length===12,"Detailed 12-stage plan missing");
  const planLessons=plan.stages.flatMap(s=>s.lessons||[]);
  assert(planLessons.length>=40,"Detailed lesson plan is too small");
+ assert(["s2_present_habits","s3_past_regular","s3_did_base","s4_future_will","s4_going_to","s6_when"].every(id=>planLessons.some(x=>x.id===id)),"Tense Builder curriculum lessons are missing");
  assert(planLessons.every(x=>Array.isArray(x.rules)&&Array.isArray(x.commonErrors)&&Array.isArray(x.promptPatterns)),"Lesson guidance fields missing");
 
  const progress=await json("/api/progress");
@@ -115,7 +127,7 @@ try{
  assert(laterToday.needsGeneration===true,"Old starter set should be replaced on later practice days");
  assert(Array.isArray(laterToday.exercises)&&laterToday.exercises.length===0,"Later Today should not silently reload the starter set");
 
- console.log("Smoke test passed: settings, curriculum, deterministic short-answer rejection, today, progress, history, sets, session persistence.");
+ console.log("Smoke test passed: settings, curriculum, Builder UI/API guards, deterministic short-answer rejection, today, progress, history, sets, session persistence.");
 } finally {
  child.kill();
  await new Promise(r=>setTimeout(r,100));
