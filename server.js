@@ -963,6 +963,197 @@ async function generateExercises(skills,count,mode,targetSequence=null,{maxStage
  return all;
 }
 
+const BUILDER_EXPANSION_STEPS=[
+ {key:"core",labelZh:"句子主干",instructionZh:"只写最核心的主语 + 动词 + 宾语/补语。句子要短，但必须完整，并继续体现所选语法目标。"},
+ {key:"modifier",labelZh:"加入形容词和副词",instructionZh:"保留上一步全部核心意思，明确加入至少一个形容词和一个合适的副词。中文要求必须写清楚具体要增加什么内容。"},
+ {key:"circumstance",labelZh:"加入时间和地点",instructionZh:"继续保留前面全部意思，再加入明确的时间和地点信息；不要只写“加时间地点”，要在中文要求中给出具体信息。"},
+ {key:"clause",labelZh:"加入从句",instructionZh:"继续保留前面全部意思，再加入一个有明确意义的从句，例如 because / when / if / who / that 中最自然的一种。中文要求必须说明从句新增的具体意思。"},
+ {key:"connection",labelZh:"加入连接或转折",instructionZh:"在已有内容上再加入一个相关想法，并使用 and / but / so 等自然连接。中文要求必须明确第二个想法是什么，以及是并列、转折还是结果。"},
+ {key:"final",labelZh:"完整扩写",instructionZh:"把前面出现的核心信息、修饰信息和逻辑关系整合成一个自然、清楚、不过度冗长的完整英文句子。"}
+];
+
+const BUILDER_TENSE_LESSON_IDS=[
+ "s2_present_habits",
+ "s3_past_regular",
+ "s3_did_base",
+ "s4_future_will",
+ "s4_going_to",
+ "s6_when"
+];
+
+const BUILDER_TENSE_STEPS=[
+ {key:"present",labelZh:"一般现在时",instructionZh:"用一般现在时表达一个经常发生的学校或日常行为。中文要求要给出完整、明确的意思。"},
+ {key:"past",labelZh:"变为一般过去时",instructionZh:"保持相同人物和核心动作，把情景明确改到过去，例如 yesterday / last week，并使用正确过去式。"},
+ {key:"past_negative",labelZh:"过去时否定",instructionZh:"保持同一主题，把句子改成过去时否定，明确要求使用 didn't + 动词原形，并在中文中说明什么事情没有发生。"},
+ {key:"future_will",labelZh:"变为一般将来时",instructionZh:"保持同一主题，把情景明确改到将来，例如 tomorrow，并要求使用 will + 动词原形。"},
+ {key:"going_to",labelZh:"表达计划",instructionZh:"继续围绕同一主题，把意思改成已经有计划或打算做的事情，明确要求使用 be going to。"},
+ {key:"time_clause",labelZh:"时态综合 + 时间从句",instructionZh:"把将来主句和 when 时间从句连接起来。中文要求要明确两个动作，并提醒 when 从句用一般现在时、主句可以用 will。"}
+];
+
+function builderResponseSchema(stepCount){
+ return {
+  type:"object",additionalProperties:false,
+  properties:{
+   titleZh:{type:"string"},
+   steps:{
+    type:"array",minItems:stepCount,maxItems:stepCount,
+    items:{type:"object",additionalProperties:false,properties:{
+     prompt:{type:"string"},
+     model:{type:"string"},
+     hints:{type:"array",minItems:3,maxItems:3,items:{type:"string"}}
+    },required:["prompt","model","hints"]}
+   }
+  },
+  required:["titleZh","steps"]
+ };
+}
+
+function defaultBuilderLesson(){
+ const stage=currentStage();
+ const candidates=lessonMasteryRows().filter(x=>x.stage===stage)
+  .sort((a,b)=>(a.attempts-b.attempts)||(a.score-b.score)||(a.order_in_stage-b.order_in_stage));
+ return candidates[0]?curriculumLesson(candidates[0].id):curriculumLesson("s1_sentence_core");
+}
+
+function builderLessonSummary(lesson){
+ return [
+  "lessonId="+lesson.id,
+  "skill="+lesson.skill_id,
+  "title="+lesson.title,
+  "objective="+lesson.objective,
+  "rules="+parseJsonArray(lesson.rules_json).join(" | "),
+  "common errors="+parseJsonArray(lesson.common_errors_json).join(" | "),
+  "required elements="+parseJsonArray(lesson.required_elements_json).join(" | "),
+  "avoid="+parseJsonArray(lesson.avoid_json).join(" | ")
+ ].join("; ");
+}
+
+async function callBuilderModel(input,format){
+ if(llmProvider==="openai"){
+  if(!client) throw new Error("OpenAI is not configured");
+  const r=await client.responses.create({
+   model:openaiModel,reasoning:{effort:"none"},max_output_tokens:3000,
+   instructions:"Return only valid JSON matching the schema.",
+   input,
+   text:{format:{type:"json_schema",name:"sentence_builder",strict:true,schema:format}}
+  });
+  return JSON.parse(r.output_text);
+ }
+ try{
+  const {data}=await requestOllamaJson("/api/chat",{
+   method:"POST",timeoutMs:ollamaGenerationTimeoutMs,
+   body:{
+    model:ollamaModel,stream:false,think:false,keep_alive:"10m",format,
+    options:{temperature:Math.max(.25,ollamaGenerationTemperature)},
+    messages:[
+     {role:"system",content:"You create tightly scaffolded English writing practice. Return ONLY JSON matching the supplied schema."},
+     {role:"user",content:input}
+    ]
+   }
+  });
+  return JSON.parse(data.message?.content||"{}");
+ }catch(e){
+  if(llmProvider!=="auto") throw e;
+  console.warn("[Builder] Ollama failed; using OpenAI fallback:",e.message);
+  if(!client) throw e;
+  const r=await client.responses.create({
+   model:openaiModel,reasoning:{effort:"none"},max_output_tokens:3000,
+   instructions:"Return only valid JSON matching the schema.",
+   input,
+   text:{format:{type:"json_schema",name:"sentence_builder",strict:true,schema:format}}
+  });
+  return JSON.parse(r.output_text);
+ }
+}
+
+function validateBuilderData(data,stepCount,kind){
+ if(!data||!Array.isArray(data.steps)||data.steps.length!==stepCount) return "expected exactly "+stepCount+" builder steps";
+ if(!containsChinese(data.titleZh)) return "builder title must be Chinese";
+ let previousWords=0;
+ for(let i=0;i<data.steps.length;i++){
+  const step=data.steps[i]||{};
+  if(!containsChinese(step.prompt)) return "step "+(i+1)+" must give a clear Chinese instruction";
+  if(!String(step.model||"").trim()) return "step "+(i+1)+" has no model answer";
+  if(!Array.isArray(step.hints)||step.hints.length!==3) return "step "+(i+1)+" must have exactly 3 hints";
+  const words=englishWordTokens(step.model).length;
+  if(words<2) return "step "+(i+1)+" model answer is too short";
+  if(kind==="expansion"&&i>0&&words+1<previousWords) return "step "+(i+1)+" should expand rather than substantially shorten the sentence";
+  previousWords=words;
+ }
+ return "";
+}
+
+async function generateBuilderChain({kind="expansion",lessonId=""}={}){
+ const builderKind=kind==="tense"?"tense":"expansion";
+ const steps=builderKind==="tense"?BUILDER_TENSE_STEPS:BUILDER_EXPANSION_STEPS;
+ let lessons;
+ if(builderKind==="tense"){
+  lessons=BUILDER_TENSE_LESSON_IDS.map(curriculumLesson);
+  if(lessons.some(x=>!x)) throw new Error("One or more tense-builder curriculum lessons are missing");
+ }else{
+  const selected=lessonId?curriculumLesson(lessonId):defaultBuilderLesson();
+  if(!selected) throw new Error("No curriculum lesson is available for sentence expansion");
+  lessons=steps.map(()=>selected);
+ }
+
+ const historical=recentHistoricalPrompts([...new Set(lessons.map(x=>x.skill_id))],60);
+ const stepGuide=steps.map((s,i)=>[
+  "STEP "+(i+1)+" / "+steps.length+" — "+s.labelZh,
+  "Instruction purpose: "+s.instructionZh,
+  "Curriculum: "+builderLessonSummary(lessons[i])
+ ].join("\n")).join("\n\n");
+
+ const baseInstructions=[
+  "Create ONE coherent scaffolded writing chain for an 11-year-old Chinese-speaking ESL learner.",
+  "All steps must stay on ONE concrete, age-appropriate school-life or daily-life theme.",
+  "CRITICAL: every step prompt must be written in clear Simplified Chinese.",
+  "CRITICAL: every prompt must state the FULL exact Chinese meaning the learner should express at that step, not merely say 'expand it', 'add an adjective', or 'change the tense'.",
+  "Each later expansion step must preserve all important meaning from the previous step and add the newly requested information.",
+  "Do not reveal the English model answer inside the Chinese prompt.",
+  "The model answer must be natural American English.",
+  "Hints are progressive: Hint 1 names the grammar idea, Hint 2 gives structure/form, Hint 3 gives key words/order but not the complete model answer.",
+  builderKind==="expansion"
+   ?"Start with a short sentence skeleton, then progressively add modifiers, circumstances, a clause, a connection/contrast/result, and finally integrate everything."
+   :"Keep the same central theme while deliberately transforming the grammar through the specified tense/form ladder.",
+  "Use easy vocabulary so grammar is the learning target.",
+  historical.length?"Avoid reusing these previous prompt ideas verbatim: "+historical.join(" | "):""
+ ].filter(Boolean).join("\n");
+
+ const input=baseInstructions+"\n\nEXACT STEP SPECIFICATION:\n"+stepGuide;
+ const format=builderResponseSchema(steps.length);
+ let data=null,problem="";
+ for(let attempt=1;attempt<=3;attempt++){
+  data=await callBuilderModel(input+(problem?"\n\nPrevious output problem: "+problem+". Regenerate the complete chain and fix it.":"") ,format);
+  problem=validateBuilderData(data,steps.length,builderKind);
+  if(!problem) break;
+  console.warn("[Builder] Rejected generated chain ("+attempt+"/3): "+problem);
+ }
+ if(problem) throw new Error("Sentence Builder could not generate a valid chain: "+problem);
+
+ const now=Date.now();
+ return data.steps.map((raw,i)=>({
+  id:"builder-"+now+"-"+(i+1),
+  lessonId:lessons[i].id,
+  type:"builder",
+  skill:lessons[i].skill_id,
+  reviewSkills:[],
+  prompt:String(raw.prompt||"").trim(),
+  focus:steps[i].labelZh+" · "+lessons[i].title,
+  hints:raw.hints.map(x=>String(x)),
+  model:String(raw.model||"").trim(),
+  builderMeta:{
+   kind:builderKind,
+   chainTitle:String(data.titleZh||"渐进式写作").trim(),
+   step:i+1,
+   totalSteps:steps.length,
+   stepKey:steps[i].key,
+   stepLabelZh:steps[i].labelZh,
+   instructionZh:steps[i].instructionZh,
+   masteryEligible:builderKind==="tense"||i===steps.length-1
+  }
+ }));
+}
+
 function practiceGroupTitle(mode,skillId,count,date=today()){
  if(mode==="skill") return (skillMap[skillId]?.name||skillId||"Skill")+" Practice · "+date+" · "+count+" questions";
  if(mode==="review") return "Review Practice · "+date+" · "+count+" questions";
