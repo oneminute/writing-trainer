@@ -1266,6 +1266,28 @@ app.post("/api/generate",async(req,res)=>{
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"Generation failed"});}
 });
 
+app.post("/api/builder/generate",async(req,res)=>{
+ try{
+  const kind=String(req.body?.kind||"expansion")==="tense"?"tense":"expansion";
+  const lessonId=String(req.body?.lessonId||"");
+  if(kind==="expansion"&&lessonId&&!curriculumLesson(lessonId)) return res.status(400).json({error:"Unknown curriculum lesson"});
+  const exercises=await generateBuilderChain({kind,lessonId});
+  const meta=exercises[0]?.builderMeta||{};
+  const selectedSkill=kind==="expansion"?(exercises[0]?.skill||null):null;
+  const title=(kind==="tense"?"Tense Ladder":"Sentence Expansion")+" · "+(meta.chainTitle||today());
+  const groupId=archivePracticeGroup("builder",selectedSkill,exercises,{title});
+  res.json({
+   kind,
+   groupId,
+   title,
+   exercises:decorateExerciseList(exercises,12)
+  });
+ }catch(e){
+  console.error(e);
+  res.status(500).json({error:e?.message||"Sentence Builder generation failed"});
+ }
+});
+
 app.get("/api/today",(req,res)=>{
  const date=today();
  db.prepare("INSERT OR IGNORE INTO daily_sessions(session_date) VALUES (?)").run(date);
@@ -1619,6 +1641,9 @@ app.post("/api/check",async(req,res)=>{
   if(!resolvedLesson) resolvedLesson=resolveExerciseLesson({skill:skillId},Math.max(currentStage(),skill?.stage||1));
   const resolvedLessonId=resolvedLesson?.id||null;
   const sessionItem=(sessionId!==undefined&&position!==undefined)?db.prepare("SELECT * FROM practice_session_items WHERE session_id=? AND position=?").get(Number(sessionId),Number(position)):null;
+  let sessionExercise=null;
+  if(sessionItem?.exercise_json){try{sessionExercise=JSON.parse(sessionItem.exercise_json);}catch{}}
+  const masteryEligible=sessionExercise?.builderMeta?.masteryEligible!==false;
   const previousAttempts=sessionItem?.attempt_count||0;
   const firstTry=previousAttempts===0;
   const lessonRules=resolvedLesson?parseJsonArray(resolvedLesson.rules_json):[];
@@ -1711,8 +1736,10 @@ app.post("/api/check",async(req,res)=>{
   }
   const info=db.prepare("INSERT INTO attempts(exercise_id,prompt,grammar_focus,answer,correct,meaning,grammar,tense,capitalization,punctuation,feedback,suggestion,better_sentence,skill_id,exercise_type,session_date,error_tag,session_id,session_position,lesson_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(String(exerciseId),prompt,grammarFocus||"",answer,r.correct?1:0,r.meaning,r.grammar,r.tense,r.capitalization,r.punctuation,r.feedback,r.suggestion,r.betterSentence,skillId,exerciseType||"practice",today(),r.errorTag,sessionId==null?null:Number(sessionId),position==null?null:Number(position),resolvedLessonId);
   const aid=Number(info.lastInsertRowid);
-  db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
-  if(resolvedLessonId) db.prepare("INSERT INTO lesson_attempts(attempt_id,lesson_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?,?)").run(aid,resolvedLessonId,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+  if(masteryEligible){
+   db.prepare("INSERT INTO skill_attempts(attempt_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?)").run(aid,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+   if(resolvedLessonId) db.prepare("INSERT INTO lesson_attempts(attempt_id,lesson_id,skill_id,success,evidence_score,first_try,hint_level,model_viewed) VALUES(?,?,?,?,?,?,?,?)").run(aid,resolvedLessonId,skillId,r.skillSuccess?1:0,evidence,firstTry?1:0,Number(hintLevel)||0,modelViewed?1:0);
+  }
 
   if(sessionItem){
    const newAttemptCount=previousAttempts+1;
@@ -1727,12 +1754,12 @@ app.post("/api/check",async(req,res)=>{
   }
 
   const q=db.prepare("SELECT * FROM review_queue WHERE skill_id=?").get(skillId);
-  if(r.skillSuccess&&evidence>=.65){
+  if(masteryEligible&&r.skillSuccess&&evidence>=.65){
    if(q){const streak=q.streak+1;if(streak>=4) db.prepare("DELETE FROM review_queue WHERE skill_id=?").run(skillId);else db.prepare("UPDATE review_queue SET due_date=?,streak=?,updated_at=CURRENT_TIMESTAMP WHERE skill_id=?").run(addDays(nextReviewDays(streak)),streak,skillId);}
-  }else if(!r.skillSuccess||evidence<.65){
+  }else if(masteryEligible&&(!r.skillSuccess||evidence<.65)){
    db.prepare("INSERT INTO review_queue(skill_id,due_date,streak,last_error) VALUES(?,?,0,?) ON CONFLICT(skill_id) DO UPDATE SET due_date=excluded.due_date,streak=0,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").run(skillId,addDays(1),(r.errorTag&&r.errorTag!=="none")?r.errorTag:"assisted_success");
   }
-  res.json({...r,attemptId:aid,evidenceScore:evidence,firstTry});
+  res.json({...r,attemptId:aid,evidenceScore:masteryEligible?evidence:null,firstTry,masteryEligible});
  }catch(e){console.error(e);res.status(500).json({error:e?.message||"LLM request failed"});}
 });
 
