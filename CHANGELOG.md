@@ -6,6 +6,11 @@ This project is pre-1.0 and evolving quickly.
 
 ### Added
 
+- progressive Sentence Builder for core → modifiers → circumstances → clauses → connections → integrated sentence
+- Tense Ladder for present → past → past negative → future forms → time-clause integration
+- explicit full Chinese target meaning for every Builder step
+- lesson-level Build action and dedicated Builder page
+
 - deterministic 12-stage / 52-lesson writing curriculum
 - curriculum seeding into SQLite
 - lesson-level mastery evidence
