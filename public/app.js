@@ -290,7 +290,7 @@ async function loadBuilder(){
 
 async function startBuilder(kind,lessonId="",button=null){
  const b=button;
- const status=$("builderStatus");
+ const status=$("builderView")&&!$("builderView").classList.contains("hidden")?$("builderStatus"):null;
  if(b){b.disabled=true;const old=b.textContent;b.dataset.oldText=old;b.textContent="Generating...";}
  if(status){status.className="notice";status.textContent=kind==="tense"?"正在生成时态阶梯…":"正在生成逐步扩写练习…";}
  try{
