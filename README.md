@@ -317,6 +317,62 @@ http://<host-computer-ip>:5178
 
 from the learner's computer.
 
+## Omarchy / Arch Linux
+
+An Omarchy/Arch bootstrap launcher is included:
+
+```bash
+chmod +x start-writing-trainer-omarchy.sh
+./start-writing-trainer-omarchy.sh
+```
+
+You can also run it without changing the executable bit:
+
+```bash
+bash start-writing-trainer-omarchy.sh
+```
+
+On the first run it can:
+
+- install missing `nodejs`, `npm`, `git`, and `curl` with `pacman`
+- create `.env` from `.env.example`
+- run `npm install`
+- run `npm test`
+- optionally install Ollama if the `ollama` command is missing
+- start Writing Trainer
+
+Normal local mode:
+
+```bash
+./start-writing-trainer-omarchy.sh
+```
+
+LAN mode:
+
+```bash
+./start-writing-trainer-omarchy.sh --lan
+```
+
+Install/check dependencies without starting the app:
+
+```bash
+./start-writing-trainer-omarchy.sh --install-only
+```
+
+Skip automatic system-package installation:
+
+```bash
+./start-writing-trainer-omarchy.sh --skip-system-packages
+```
+
+Skip the Ollama install prompt:
+
+```bash
+./start-writing-trainer-omarchy.sh --skip-ollama-install
+```
+
+If Ollama is installed, the Writing Trainer server itself checks whether the Ollama service is running and attempts to start it automatically.
+
 ## Configuration
 
 See `.env.example`.
