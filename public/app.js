@@ -57,7 +57,8 @@ function showFeedback(d){
   '<p><b>Feedback:</b> '+esc(d.feedback)+'</p>'+
   '<p><b>Suggestion:</b> '+esc(d.suggestion)+'</p>'+
   '<p><b>Better sentence:</b> '+esc(d.betterSentence)+'</p>'+
-  (d.evidenceScore===undefined?"":'<p class="muted"><b>Mastery evidence:</b> '+Math.round(d.evidenceScore*100)+'%</p>');
+  (d.evidenceScore==null?"":'<p class="muted"><b>Mastery evidence:</b> '+Math.round(d.evidenceScore*100)+'%</p>')+
+  (d.masteryEligible===false?'<p class="muted"><b>Builder step:</b> This scaffold step is for guided practice and does not independently raise mastery.</p>':"");
 }
 
 function resetQuestionPanels(){
@@ -82,6 +83,8 @@ function render(){
  $("type").textContent=String(q.type||"practice").replaceAll("_"," ");
  $("focus").textContent=q.focus||q.skill||"";
  const meta=q.planMeta||{};
+ const builder=q.builderMeta||null;
+ const previousBuilderAnswer=builder&&index>0?String(sessionItemAt(index-1)?.answer||"").trim():"";
  $("lessonContext").innerHTML=
   '<div class="lesson-breadcrumb">'+
    (meta.stage?'<span class="curriculum-chip stage-chip">Stage '+esc(meta.stage)+(meta.stageTitle?' · '+esc(meta.stageTitle):'')+'</span>':'')+
@@ -89,8 +92,14 @@ function render(){
    (meta.skillName?'<span class="curriculum-chip skill-chip">Skill · '+esc(meta.skillName)+'</span>':'')+
   '</div>'+
   (meta.objective?'<div class="lesson-objective"><b>Practice target:</b> '+esc(meta.objective)+'</div>':'')+
-  (meta.difficulty?'<div class="lesson-difficulty">'+esc(meta.difficulty)+'</div>':'');
+  (meta.difficulty?'<div class="lesson-difficulty">'+esc(meta.difficulty)+'</div>':'')+
+  (builder?'<div class="builder-step-context">'+
+    '<div class="builder-step-head"><b>第 '+esc(builder.step)+' / '+esc(builder.totalSteps)+' 步 · '+esc(builder.stepLabelZh)+'</b><span>'+esc(builder.chainTitle||"渐进式写作")+'</span></div>'+
+    '<p><b>本步训练要求：</b>'+esc(builder.instructionZh||"")+'</p>'+
+    (previousBuilderAnswer?'<p class="previous-builder-answer"><b>你上一步写的是：</b> '+esc(previousBuilderAnswer)+'</p>':'')+
+   '</div>':'');
  $("prompt").textContent=q.prompt||"";
+ $("answerLabel").textContent=builder?"请严格按照上面的中文要求写这一阶段的英文句子：":"Write one complete English sentence:";
  $("progressText").textContent=(index+1)+" / "+exercises.length;
  $("progressBar").style.width=((index+1)/exercises.length*100)+"%";
  $("score").textContent="Completed "+correctToday.size+" / "+exercises.length;
@@ -233,7 +242,7 @@ async function loadPlan(){
      '<div class="lesson-main"><div><div class="lesson-title">'+esc(l.title)+'</div>'+
       '<small>Skill: '+esc(l.skill_id)+' • '+esc(l.status)+' • '+l.score+'% • evidence '+l.attempts+' • independent '+l.independentCorrect+' / assisted '+l.assistedCorrect+'</small>'+
       '<p>'+esc(l.objective)+'</p></div>'+
-      '<div class="lesson-actions"><button data-plan-action="details" data-lesson="'+l.id+'">Details</button><button class="primary" data-plan-action="practice" data-lesson="'+l.id+'" data-skill="'+l.skill_id+'">Practice</button></div></div>'+
+      '<div class="lesson-actions"><button data-plan-action="details" data-lesson="'+l.id+'">Details</button><button data-plan-action="build" data-lesson="'+l.id+'">Build</button><button class="primary" data-plan-action="practice" data-lesson="'+l.id+'" data-skill="'+l.skill_id+'">Practice</button></div></div>'+
      '<div class="lesson-detail hidden" id="lesson-detail-'+l.id+'">'+
       '<div class="lesson-detail-grid">'+
        '<div><h4>Rules Qwen must test</h4>'+planList(l.rules||[])+'</div>'+
@@ -255,10 +264,49 @@ async function loadPlan(){
   if(b.dataset.planAction==="details"){
    const detail=$("lesson-detail-"+b.dataset.lesson);
    if(detail) detail.classList.toggle("hidden");
+  }else if(b.dataset.planAction==="build"){
+   startBuilder("expansion",b.dataset.lesson,b);
   }else if(b.dataset.planAction==="practice"){
    startLesson(b.dataset.lesson,b.dataset.skill,b);
   }
  };
+}
+
+async function loadBuilder(){
+ const select=$("builderLesson");
+ const d=await get("/api/plan");
+ const old=select.value;
+ select.innerHTML=d.stages.map(stage=>
+  '<optgroup label="Stage '+stage.stage+' · '+esc(stage.title)+'">'+
+  stage.lessons.map(l=>'<option value="'+esc(l.id)+'" '+(stage.stage===d.currentStage?'data-current="1"':'')+'>'+esc(l.title)+' · '+esc(l.skill_id.replaceAll("_"," "))+'</option>').join("")+
+  '</optgroup>'
+ ).join("");
+ if(old&&[...select.options].some(o=>o.value===old)) select.value=old;
+ else{
+  const current=[...select.options].find(o=>o.dataset.current==="1");
+  if(current) select.value=current.value;
+ }
+}
+
+async function startBuilder(kind,lessonId="",button=null){
+ const b=button;
+ const status=$("builderStatus");
+ if(b){b.disabled=true;const old=b.textContent;b.dataset.oldText=old;b.textContent="Generating...";}
+ if(status){status.className="notice";status.textContent=kind==="tense"?"正在生成时态阶梯…":"正在生成逐步扩写练习…";}
+ try{
+  const d=await post("/api/builder/generate",{kind,lessonId});
+  if(!d.groupId) throw new Error("Builder practice was not saved.");
+  if(status){status.className="notice hidden";status.textContent="";}
+  await startGroupSession(d.groupId,{
+   title:kind==="tense"?"Tense Ladder · 时态阶梯":"Sentence Builder · 渐进式扩写",
+   meta:(d.title||"Scaffolded writing")+" • "+d.exercises.length+" steps • every step has a clear Chinese target"
+  });
+ }catch(e){
+  if(status){status.className="result bad";status.textContent=e.message;}
+  else alert("Could not generate Sentence Builder practice: "+e.message);
+ }finally{
+  if(b&&b.isConnected){b.disabled=false;b.textContent=b.dataset.oldText||"Start";delete b.dataset.oldText;}
+ }
 }
 
 async function startLesson(lessonId,skillId,button=null){
@@ -599,6 +647,7 @@ $("historyList").onclick=e=>{toggleAttemptDetail(e.target);};
 document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{
  activateView(b.dataset.view);
  if(b.dataset.view==="today") await loadToday();
+ if(b.dataset.view==="builder") await loadBuilder();
  if(b.dataset.view==="plan") await loadPlan();
  if(b.dataset.view==="progress") await loadProgress();
  if(b.dataset.view==="review") await loadReview();
@@ -635,6 +684,9 @@ $("generateReview").onclick=async()=>{
   await startGroupSession(d.groupId,{title:"Review Practice",meta:"Generated from due skills • saved permanently • "+d.exercises.length+" questions"});
  }catch(e){alert(e.message);}
 };
+
+$("startExpansionBuilder").onclick=()=>startBuilder("expansion",$("builderLesson").value,$("startExpansionBuilder"));
+$("startTenseBuilder").onclick=()=>startBuilder("tense","",$("startTenseBuilder"));
 
 $("saveSettings").onclick=saveSettings;
 
