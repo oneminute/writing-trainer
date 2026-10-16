@@ -94,6 +94,40 @@ Practice target:
 Use did/didn't for past questions and negatives with the base form.
 ```
 
+### Builder — scaffold a sentence from a core to a complex form
+
+Sentence Builder teaches a target expression or grammar pattern by making the learner build the same idea in stages instead of jumping directly to a long sentence.
+
+Two modes are available:
+
+**Sentence Expansion**
+
+```text
+sentence core
+→ adjective / adverb detail
+→ time + place
+→ clause
+→ connection / contrast / result
+→ integrated final sentence
+```
+
+The learner can select any curriculum lesson as the primary grammar target. Intermediate scaffold steps are training-only; the final integrated step is the main mastery evidence so one six-step chain does not artificially count as six independent mastery demonstrations.
+
+**Tense Ladder**
+
+```text
+present simple
+→ past simple
+→ didn't + base verb
+→ will
+→ be going to
+→ when-clause + future main clause
+```
+
+Every step gives a **full, explicit Simplified-Chinese target meaning** plus a Chinese explanation of what must change. The learner should never have to guess what "expand this sentence" means.
+
+The previous student-written sentence is shown on the next Builder step so the learner can see how the sentence is growing.
+
 ### Plan — inspectable curriculum
 
 The Plan page exposes the actual teaching specification used to guide generation:
